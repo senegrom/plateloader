@@ -19,93 +19,111 @@ let plateMax = PLATES.map(() => 2);
 // Algorithm: buildAlgoLib is defined in algo.js, loaded before this file.
 
 const algoLib = buildAlgoLib();
+const stateLib = buildStateLib();
 
 // ---------- Web Worker for off-main-thread optimisation ----------
 // Cancellation is by reqId: stale results are discarded silently.
 // Sync fallback if Worker creation fails or the worker errors.
-const ALGO_WORKER_SOURCE = `
-"use strict";
-${buildAlgoLib.toString()}
-const algoLib = buildAlgoLib();
-self.onmessage = function(e) {
-  try {
-    const d = e.data;
-    self.postMessage({ reqId: d.reqId, hasStart: d.hasStart, results: algoLib.optimize(d.weights, d.mode, d.plateMax, d.PLATES, d.BAR, d.startStack, d.monotonic, d.sided) });
-  } catch (err) {
-    self.postMessage({ reqId: (e.data && e.data.reqId) || -1, error: String((err && err.message) || err) });
-  }
-};
-`;
-
 let algoWorker = null;
 let workerInitTried = false;
 let workerEverSucceeded = false;
-let workerBlobUrl = null;
 let currentReqId = 0;
 const inflightReqs = new Set();
 const indicatorTimers = new Map();      // reqId → timeoutId
 const INDICATOR_DELAY_MS = 150;
 
 function clearIndicator(reqId) {
-  const t = indicatorTimers.get(reqId);
-  if (t) { clearTimeout(t); indicatorTimers.delete(reqId); }
+  if (!indicatorTimers.has(reqId)) return;
+  clearTimeout(indicatorTimers.get(reqId));
+  indicatorTimers.delete(reqId);
+}
+
+function disposeAlgoWorker(allowRetry) {
+  if (algoWorker) {
+    algoWorker.onmessage = null;
+    algoWorker.onerror = null;
+    try { algoWorker.terminate(); } catch (_) {}
+  }
+  algoWorker = null;
+  workerInitTried = !allowRetry;
+  for (const reqId of inflightReqs) clearIndicator(reqId);
+  inflightReqs.clear();
 }
 
 function ensureAlgoWorker() {
   if (algoWorker || workerInitTried) return algoWorker;
   workerInitTried = true;
-  if (typeof Worker === 'undefined' || typeof Blob === 'undefined' || !URL.createObjectURL) return null;
+  if (typeof Worker === 'undefined') return null;
+
   try {
-    workerBlobUrl = URL.createObjectURL(new Blob([ALGO_WORKER_SOURCE], { type: 'text/javascript' }));
-    const w = new Worker(workerBlobUrl);
-    w.onmessage = (e) => {
-      workerEverSucceeded = true;
-      const { reqId, results, error, hasStart } = e.data;
+    const worker = new Worker('algo-worker.js');
+    worker.onmessage = (event) => {
+      const { reqId, results, error, hasStart } = event.data;
       inflightReqs.delete(reqId);
       clearIndicator(reqId);
       if (reqId !== currentReqId) return;
-      if (error) { console.warn('[plate-loader] worker error, retrying sync:', error); compute(true); return; }
+      if (error) {
+        console.warn('[plate-loader] worker error, retrying sync:', error);
+        disposeAlgoWorker(false);
+        compute(true);
+        return;
+      }
+      workerEverSucceeded = true;
       renderResults(results, hasStart);
     };
-    w.onerror = (e) => {
-      // Quiet on first failure (likely env restriction like CSP); log if it
-      // happens after a successful run.
+    worker.onerror = (event) => {
+      // Quiet on first failure (usually a worker-policy restriction); log if
+      // it happens after the worker has already completed useful work.
       if (workerEverSucceeded) {
-        console.warn('[plate-loader] worker died, using sync fallback:',
-          { message: e.message || '(empty)', filename: e.filename, lineno: e.lineno });
+        console.warn('[plate-loader] worker died, using sync fallback:', {
+          message: event.message || '(empty)',
+          filename: event.filename,
+          lineno: event.lineno,
+        });
       }
-      try { w.terminate(); } catch (_) {}
-      if (workerBlobUrl) { try { URL.revokeObjectURL(workerBlobUrl); } catch (_) {} workerBlobUrl = null; }
-      algoWorker = null;
       const hadInflight = inflightReqs.size > 0;
-      inflightReqs.clear();
+      disposeAlgoWorker(false);
       if (hadInflight) compute(true);
     };
-    return algoWorker = w;
-  } catch (e) {
-    console.warn('[plate-loader] worker init failed, using sync:', e && e.message);
+    algoWorker = worker;
+    return algoWorker;
+  } catch (error) {
+    console.warn('[plate-loader] worker init failed, using sync:', error && error.message);
     return null;
   }
 }
-
-window.addEventListener('beforeunload', () => {
-  if (algoWorker) { try { algoWorker.terminate(); } catch (_) {} algoWorker = null; }
-  if (workerBlobUrl) { try { URL.revokeObjectURL(workerBlobUrl); } catch (_) {} workerBlobUrl = null; }
-});
 
 // ---------- rendering ----------
 const esc = (s) => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
 const MAX_TOTAL_KG = 1000;
 const MAX_SETS = 50;
-const parseInput = (text) => text.split(/[\s,;]+/).map(s => s.trim()).filter(Boolean)
-  .map(Number)
-  .filter(n => Number.isFinite(n) && n >= 0 && n <= MAX_TOTAL_KG)
-  .slice(0, MAX_SETS);
+const readInput = () => stateLib.parseWeightInput(inputEl.value, {
+  maxSets: MAX_SETS,
+  maxKg: MAX_TOTAL_KG,
+});
+
+function renderInputErrors(errors) {
+  const visible = errors.slice(0, 5);
+  const remaining = errors.length - visible.length;
+  inputEl.setAttribute('aria-invalid', 'true');
+  inputEl.setAttribute('aria-errormessage', 'inputErrors');
+  $('output').innerHTML = `<div class="panel input-error" id="inputErrors" role="alert">
+    <strong>Check the set list.</strong>
+    <ul>${visible.map((message) => `<li>${esc(message)}</li>`).join('')}
+      ${remaining > 0 ? `<li>…and ${remaining} more.</li>` : ''}</ul>
+  </div>`;
+  $('summaryPanel').hidden = true;
+}
+
+function clearInputErrorState() {
+  inputEl.removeAttribute('aria-invalid');
+  inputEl.removeAttribute('aria-errormessage');
+}
 
 function renderPlate(plateIdx, opts) {
   const p = PLATES[plateIdx];
-  const dark = [20, 10, 2.5, 1.25].includes(p.kg) ? ' dark' : '';
+  const dark = [25, 20, 10, 2.5, 1.25].includes(p.kg) ? ' dark' : '';
   let cls = `plate ${p.cls}${dark}`;
   if (opts) {
     if (opts.added)   cls += opts.side === 'left' ? ' added-left' : ' added-right';
@@ -114,27 +132,51 @@ function renderPlate(plateIdx, opts) {
   return `<div class="${cls}" title="${p.kg} kg plate" aria-hidden="true"><span class="plate-label">${p.label}</span></div>`;
 }
 
-function renderBar(stack, prevStack) {
-  let i = 0;
-  while (i < prevStack.length && i < stack.length && prevStack[i] === stack[i]) i++;
-  const newFromIdx = i;
-
-  let leftHtml = '', rightHtml = '';
-  if (!oneSided) {
-    for (let k = stack.length - 1; k >= 0; k--) leftHtml += renderPlate(stack[k], { added: k >= newFromIdx, carried: k < newFromIdx, side: 'left'  });
-  }
-  for (let k = 0; k < stack.length; k++)      rightHtml += renderPlate(stack[k], { added: k >= newFromIdx, carried: k < newFromIdx, side: 'right' });
-
+function barDescription(stack) {
   const counts = {};
-  for (const i of stack) counts[PLATES[i].label] = (counts[PLATES[i].label] || 0) + 1;
-  const sideText = oneSided ? '' : ' per side';
-  const desc = Object.keys(counts).length
-    ? Object.entries(counts).map(([k, v]) => `${v} times ${k} kg`).join(', ') + sideText
-    : 'bar only';
+  for (const plateIdx of stack) {
+    const label = PLATES[plateIdx].label;
+    counts[label] = (counts[label] || 0) + 1;
+  }
+  if (!Object.keys(counts).length) return `${BAR} kg bar only`;
+  const plates = Object.entries(counts)
+    .map(([label, count]) => `${count} times ${label} kg`)
+    .join(', ');
+  return `${BAR} kg bar with ${plates}${oneSided ? '' : ' per side'}`;
+}
 
-  return `<div class="bar-wrap"><div class="bar-row" role="img" aria-label="${BAR} kg bar with ${desc}">
-    ${leftHtml}<div class="collar"></div><div class="bar"></div><div class="collar"></div>${rightHtml}
-  </div></div>`;
+function renderBarRow(stack, prevStack = [], options = {}) {
+  const animateChanges = options.animateChanges !== false;
+  let sharedPrefix = 0;
+  while (
+    sharedPrefix < prevStack.length &&
+    sharedPrefix < stack.length &&
+    prevStack[sharedPrefix] === stack[sharedPrefix]
+  ) sharedPrefix++;
+
+  const plateOptions = (stackIndex, side) => animateChanges
+    ? { added: stackIndex >= sharedPrefix, carried: stackIndex < sharedPrefix, side }
+    : { side };
+
+  let leftHtml = '';
+  let rightHtml = '';
+  if (!oneSided) {
+    for (let idx = stack.length - 1; idx >= 0; idx--) {
+      leftHtml += renderPlate(stack[idx], plateOptions(idx, 'left'));
+    }
+  }
+  for (let idx = 0; idx < stack.length; idx++) {
+    rightHtml += renderPlate(stack[idx], plateOptions(idx, 'right'));
+  }
+
+  const accessibility = options.label === false
+    ? ''
+    : ` role="img" aria-label="${barDescription(stack)}"`;
+  return `<div class="bar-row"${accessibility}>${leftHtml}<div class="collar"></div><div class="bar"></div><div class="collar"></div>${rightHtml}</div>`;
+}
+
+function renderBar(stack, prevStack, options) {
+  return `<div class="bar-wrap">${renderBarRow(stack, prevStack, options)}</div>`;
 }
 
 function plateChips(counts) {
@@ -142,7 +184,8 @@ function plateChips(counts) {
   for (let i = 0; i < counts.length; i++) {
     if (counts[i] > 0) {
       const n = counts[i], lbl = PLATES[i].label;
-      parts.push(`<span class="chip" aria-label="${n} ${lbl} kilogram plate${n !== 1 ? 's' : ''}">${n}× ${lbl} kg</span>`);
+      const scope = oneSided ? '' : ' per side';
+      parts.push(`<span class="chip" aria-label="${n} ${lbl} kilogram plate${n !== 1 ? 's' : ''}${scope}">${n}× ${lbl} kg</span>`);
     }
   }
   return parts.length ? parts.join(' ') : '<span class="chip">bar only</span>';
@@ -157,7 +200,7 @@ const fmtKg = (x) => x.toFixed(2).replace(/0+$/, '').replace(/\.$/, '');
 
 function changeText(r, mode) {
   const kgDetail = (mode === 'kg' || mode === 'sqrt')
-    ? ` <span style="opacity:0.7">${fmtKg(r.bothSidesKg)} kg</span>` : '';
+    ? ` <span class="kg-detail">${fmtKg(r.bothSidesKg)} kg</span>` : '';
   if (r.isStart) {
     return `<span class="delta ${deltaClass(r.bothSidesMoves)}">load ${r.bothSidesMoves} plate${r.bothSidesMoves !== 1 ? 's' : ''}</span>${kgDetail}`;
   }
@@ -174,6 +217,7 @@ function renderResults(results, hasStart) {
 
   out.innerHTML = '';
   let totalMoves = 0, totalKg = 0, totalSqrt = 0, validSets = 0;
+  const userSetCount = Math.max(0, results.length - (hasStart ? 1 : 0));
   let prevStack = [];
   let setNum = 0;  // 1-based count of "real" sets (excludes the starting state)
 
@@ -216,8 +260,8 @@ function renderResults(results, hasStart) {
         <div class="set-total">${r.total}<span class="unit">kg</span></div>
         <div class="set-changes">${changes}</div>
       </div>
-      ${renderBar(r.stack, isStartingState ? [] : (r.isStart ? [] : prevStack))}
-      <div class="plate-list">${plateChips(r.counts)}${oneSided ? '' : ' <span style="opacity:0.6">· per side</span>'}</div>`;
+      ${renderBar(r.stack, isStartingState ? [] : (r.isStart ? [] : prevStack), { animateChanges: !isStartingState })}
+      <div class="plate-list">${plateChips(r.counts)}${oneSided ? '' : ' <span class="scope-note">· per side</span>'}</div>`;
     out.appendChild(card);
     prevStack = r.stack;
 
@@ -229,11 +273,11 @@ function renderResults(results, hasStart) {
       const cleanup = document.createElement('div');
       cleanup.className = 'set cleanup';
       const kgDetail = (CURRENT_MODE === 'kg' || CURRENT_MODE === 'sqrt')
-        ? ` <span style="opacity:0.7">${fmtKg(r.cleanup.bothSidesKg)} kg</span>` : '';
+        ? ` <span class="kg-detail">${fmtKg(r.cleanup.bothSidesKg)} kg</span>` : '';
       cleanup.innerHTML = `
         <div class="set-head">
           <div class="set-num">UNLOAD</div>
-          <div class="set-total" style="color:var(--ink-dim);">→ bar only</div>
+          <div class="set-total">→ bar only</div>
           <div class="set-changes"><span class="delta ${deltaClass(r.cleanup.bothSidesMoves)}">−${r.cleanup.removedIdx.length}${oneSided ? '' : '/side'} · ${r.cleanup.bothSidesMoves} moves</span>${kgDetail}</div>
         </div>
         ${renderBar([], r.stack)}`;
@@ -243,27 +287,33 @@ function renderResults(results, hasStart) {
   });
 
   if (validSets > 0) {
-    summaryPanel.style.display = '';
+    summaryPanel.hidden = false;
     $('summary').innerHTML = `
-      <div><span>Sets</span><b>${validSets}${results.length !== validSets ? ` / ${results.length}` : ''}</b></div>
+      <div><span>Sets</span><b>${validSets}${userSetCount !== validSets ? ` / ${userSetCount}` : ''}</b></div>
       <div><span>Total plate moves</span><b>${totalMoves}</b></div>
       <div><span>Total kg moved</span><b>${fmtKg(totalKg)}</b></div>
       <div><span>Σ√kg moved</span><b>${totalSqrt.toFixed(2)}</b></div>`;
     $('legend').innerHTML = PLATES.map(p =>
-      `<span><i style="background:var(--p-${p.label.replace('.', '_')})"></i>${p.label} kg</span>`
+      `<span><i class="${p.cls}" aria-hidden="true"></i>${p.label} kg</span>`
     ).join('');
   } else {
-    summaryPanel.style.display = 'none';
+    summaryPanel.hidden = true;
   }
 }
 
 // ---------- wire-up ----------
 const debounce = (fn, ms) => {
-  let t = null;
-  return function (...args) {
-    if (t) clearTimeout(t);
-    t = setTimeout(() => { t = null; fn.apply(this, args); }, ms);
+  let timer = null;
+  const wrapped = function (...args) {
+    if (timer !== null) clearTimeout(timer);
+    timer = setTimeout(() => { timer = null; fn.apply(this, args); }, ms);
   };
+  wrapped.cancel = () => {
+    if (timer === null) return;
+    clearTimeout(timer);
+    timer = null;
+  };
+  return wrapped;
 };
 
 const stockSlider = $('stockSlider'), stockValue = $('stockValue');
@@ -275,6 +325,7 @@ const startVizEl   = $('startViz');
 const startButtonsEl = $('startButtons');
 const startTotalEl   = $('startTotal');
 const startClearBtn  = $('startClear');
+const startRemoveBtn = $('startRemove');
 const monotonicToggle = $('monotonicToggle');
 const oneSidedToggle  = $('oneSidedToggle');
 let monotonic = false;
@@ -287,7 +338,18 @@ let startStack = null;
 const STATE_KEY     = 'plateLoader.v1';
 const STOCK_MAX     = parseInt(stockSlider.max, 10) || 6;
 const DEFAULT_STOCK = parseInt(stockSlider.defaultValue || stockSlider.value, 10);
-let CURRENT_MODE = 'count';
+const DEFAULT_MODE  = 'count';
+let CURRENT_MODE = DEFAULT_MODE;
+const DEFAULT_STATE = Object.freeze({
+  input: '',
+  mode: DEFAULT_MODE,
+  stock: DEFAULT_STOCK,
+  bar: DEFAULT_BAR,
+  startStack: null,
+  monotonic: false,
+  oneSided: false,
+  compact: false,
+});
 
 // startStack is an ORDERED list of plate indices, innermost → outermost.
 // Validates and clamps an array; returns null if empty / invalid.
@@ -326,21 +388,26 @@ function updateStartTotalDisplay() {
 function renderStartViz() {
   if (!startStack || startStack.length === 0) {
     startVizEl.innerHTML = '';
+    startVizEl.setAttribute('aria-label', barDescription([]));
     return;
   }
-  // Reuse the same bar visualization style as result cards.
-  // For starting state, all plates are "carried" — none animated.
-  let leftHtml = '', rightHtml = '';
-  if (!oneSided) {
-    for (let k = startStack.length - 1; k >= 0; k--) leftHtml += renderPlate(startStack[k], { carried: false, side: 'left' });
-  }
-  for (let k = 0; k < startStack.length; k++)      rightHtml += renderPlate(startStack[k], { carried: false, side: 'right' });
-  startVizEl.innerHTML = `<div class="bar-row">${leftHtml}<div class="collar"></div><div class="bar"></div><div class="collar"></div>${rightHtml}</div>`;
+  startVizEl.setAttribute('aria-label', barDescription(startStack));
+  startVizEl.innerHTML = renderBarRow(startStack, [], { animateChanges: false, label: false });
+}
+
+function updateStartControls() {
+  const hasStack = !!(startStack && startStack.length);
+  startClearBtn.disabled = !hasStack;
+  startRemoveBtn.disabled = !hasStack;
+  startRemoveBtn.textContent = hasStack
+    ? `Remove outermost (${PLATES[startStack[startStack.length - 1]].label} kg)`
+    : 'Remove outermost';
 }
 
 function setStartStack(arr) {
   startStack = normaliseStack(arr);
   if (monotonic && startStack) startStack.sort((a, b) => a - b);  // non-decreasing idx = weight non-increasing
+  updateStartControls();
   updateStartTotalDisplay();
   renderStartViz();
 }
@@ -350,6 +417,7 @@ function setMonotonic(on) {
   monotonicToggle.checked = monotonic;
   if (monotonic && startStack) {  // re-sort existing start stack
     startStack = startStack.slice().sort((a, b) => a - b);
+    updateStartControls();
     renderStartViz();
   }
 }
@@ -369,43 +437,63 @@ function setOneSided(on) {
 function buildStartButtons() {
   startButtonsEl.innerHTML = PLATES.map((p, i) =>
     `<button type="button" class="start-btn" data-plate-idx="${i}"
-       aria-label="Add a ${p.label} kg plate. Right-click to remove the outermost ${p.label} kg.">
-       <span class="swatch" style="background:var(--p-${p.label.replace('.', '_')})"></span>${p.label}
+       aria-label="Add a ${p.label} kg plate. Shift-click, Delete, or right-click removes the outermost ${p.label} kg plate.">
+       <span class="swatch ${p.cls}" aria-hidden="true"></span>${p.label}
      </button>`
   ).join('');
 }
 
-// Click button → push plate to outer end. Right-click → remove the outermost
-// occurrence of that type (last index in the array since outermost is last).
+function finishStartChange() {
+  persist();
+  if (inputEl.value.trim()) scheduleCompute();
+}
+
+function removeStartPlate(plateIdx = null) {
+  if (!startStack || startStack.length === 0) return false;
+  const arr = startStack.slice();
+  if (plateIdx === null) {
+    arr.pop();
+  } else {
+    const index = arr.lastIndexOf(plateIdx);
+    if (index < 0) return false;
+    arr.splice(index, 1);
+  }
+  setStartStack(arr.length ? arr : null);
+  finishStartChange();
+  return true;
+}
+
+// Click or Enter adds to the outer end. Shift-click, Delete, or the context
+// menu removes the outermost occurrence of that plate type.
 function onStartButtonClick(e) {
   const btn = e.target.closest('.start-btn');
   if (!btn) return;
   e.preventDefault();
   const idx = parseInt(btn.dataset.plateIdx, 10);
+  if (e.shiftKey) {
+    removeStartPlate(idx);
+    return;
+  }
   const arr = startStack ? startStack.slice() : [];
   arr.push(idx);
   if (!normaliseStack(arr)) return;  // at cap — ignore click (setStartStack would clear all)
   setStartStack(arr);
-  persist();
-  if (inputEl.value.trim()) debouncedCompute();
+  finishStartChange();
 }
+
 function onStartButtonContextMenu(e) {
   const btn = e.target.closest('.start-btn');
   if (!btn) return;
   e.preventDefault();
-  if (!startStack || startStack.length === 0) return;
-  const idx = parseInt(btn.dataset.plateIdx, 10);
-  // Find outermost occurrence (last in array) of this plate type.
-  for (let i = startStack.length - 1; i >= 0; i--) {
-    if (startStack[i] === idx) {
-      const arr = startStack.slice();
-      arr.splice(i, 1);
-      setStartStack(arr.length ? arr : null);
-      persist();
-      if (inputEl.value.trim()) debouncedCompute();
-      return;
-    }
-  }
+  removeStartPlate(parseInt(btn.dataset.plateIdx, 10));
+}
+
+function onStartButtonKeyDown(e) {
+  if (e.key !== 'Delete' && e.key !== 'Backspace') return;
+  const btn = e.target.closest('.start-btn');
+  if (!btn) return;
+  e.preventDefault();
+  removeStartPlate(parseInt(btn.dataset.plateIdx, 10));
 }
 
 function setBar(kg) {
@@ -416,6 +504,7 @@ function setBar(kg) {
   const subEl = $('barSub');
   if (subEl) subEl.textContent = `Deadlift · ${kg} kg bar`;
   if (startTotalEl) updateStartTotalDisplay();  // start total includes BAR
+  if (startVizEl) renderStartViz();              // accessible description includes BAR
 }
 
 function setMode(m) {
@@ -432,12 +521,12 @@ function setMode(m) {
 
 function setStock(n) {
   n = Math.max(0, Math.min(STOCK_MAX, n | 0));
+  const changed = n !== plateMax[0];
   stockSlider.style.setProperty('--fill', (n * 100 / STOCK_MAX) + '%');
-  if (n === plateMax[0]) return false;
   stockSlider.value = String(n);
   stockValue.textContent = String(n);
   plateMax.fill(n);
-  return true;
+  return changed;
 }
 
 function setCompact(on) {
@@ -456,6 +545,8 @@ const updateComputeBtn = () => { goBtn.disabled = inputEl.value.trim().length ==
 // on arrival, even for empty-input or fallback paths.
 let pendingCompute = false;
 function compute(forceSync) {
+  debouncedCompute.cancel();
+  if (!forceSync && inflightReqs.size > 0) disposeAlgoWorker(true);
   // Skip while tab is hidden, but invalidate any in-flight request so its
   // stale result doesn't render after the user types more.
   if (document.visibilityState === 'hidden') {
@@ -464,12 +555,17 @@ function compute(forceSync) {
     return;
   }
   const reqId = ++currentReqId;
-  const weights = parseInput(inputEl.value);
+  const { weights, errors } = readInput();
   const out = $('output');
   const summaryPanel = $('summaryPanel');
+  if (errors.length) {
+    renderInputErrors(errors);
+    return;
+  }
+  clearInputErrorState();
   if (weights.length === 0) {
-    out.innerHTML = '<div class="panel" style="text-align:center;color:var(--ink-dim);">Enter some weights above.</div>';
-    summaryPanel.style.display = 'none';
+    out.innerHTML = '<div class="panel empty-state">Enter some weights above.</div>';
+    summaryPanel.hidden = true;
     return;
   }
 
@@ -481,7 +577,7 @@ function compute(forceSync) {
   const showIndicator = () => {
     if (currentReqId !== reqId) return;
     out.innerHTML = '<div class="panel computing-indicator">Computing…</div>';
-    summaryPanel.style.display = 'none';
+    summaryPanel.hidden = true;
   };
 
   const worker = forceSync ? null : ensureAlgoWorker();
@@ -537,27 +633,35 @@ const snapshotState = () => ({
   compact:    document.body.classList.contains('compact'),
 });
 
-const saveState = () => { try { localStorage.setItem(STATE_KEY, JSON.stringify(snapshotState())); } catch (_) {} };
+const saveState = () => {
+  try { localStorage.setItem(STATE_KEY, JSON.stringify(snapshotState())); } catch (_) {}
+};
+
+function applyState(state) {
+  const next = state && typeof state === 'object' ? state : DEFAULT_STATE;
+  inputEl.value = typeof next.input === 'string' ? next.input : DEFAULT_STATE.input;
+  setMode(['count', 'kg', 'sqrt'].includes(next.mode) ? next.mode : DEFAULT_MODE);
+  setStock(Number.isFinite(next.stock) ? next.stock : DEFAULT_STOCK);
+  setBar(Number.isFinite(next.bar) ? next.bar : DEFAULT_BAR);
+  setMonotonic(next.monotonic === true);
+  setOneSided(next.oneSided === true);
+  setStartStack(Array.isArray(next.startStack) ? next.startStack : null);
+  setCompact(next.compact === true);
+}
 
 function loadStateFromStorage() {
-  let s = null;
-  try { s = JSON.parse(localStorage.getItem(STATE_KEY) || 'null'); } catch (_) {}
-  if (!s) return;
-  if (typeof s.input === 'string') inputEl.value = s.input;
-  if (s.mode) setMode(s.mode);
-  if (Number.isFinite(s.stock)) setStock(s.stock);
-  if (Number.isFinite(s.bar)) setBar(s.bar);
-  if (typeof s.monotonic === 'boolean') setMonotonic(s.monotonic);
-  if (typeof s.oneSided === 'boolean')  setOneSided(s.oneSided);
-  if (Array.isArray(s.startStack)) setStartStack(s.startStack);
-  if (s.compact) setCompact(true);
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem(STATE_KEY) || 'null'); } catch (_) {}
+  if (!saved || typeof saved !== 'object') return false;
+  applyState({ ...DEFAULT_STATE, ...saved });
+  return true;
 }
 
 function serializeHash() {
-  const weights = parseInput(inputEl.value).join(',');
+  const input = inputEl.value.replace(/\r\n?/g, '\n');
   const parts = [];
-  if (weights) parts.push('w=' + weights);
-  if (CURRENT_MODE !== 'count') parts.push('m=' + CURRENT_MODE);
+  if (input) parts.push('w=' + encodeURIComponent(input));
+  if (CURRENT_MODE !== DEFAULT_MODE) parts.push('m=' + CURRENT_MODE);
   const stock = parseInt(stockSlider.value, 10);
   if (stock !== DEFAULT_STOCK) parts.push('s=' + stock);
   if (BAR !== DEFAULT_BAR) parts.push('b=' + BAR);
@@ -569,34 +673,11 @@ function serializeHash() {
   return parts.length ? '#' + parts.join('&') : '';
 }
 
-function parseHash() {
-  const h = location.hash.slice(1);
-  if (!h) return null;
-  const out = {};
-  for (const pair of h.split('&')) {
-    const eq = pair.indexOf('=');
-    if (eq < 0) continue;
-    try { out[pair.slice(0, eq)] = decodeURIComponent(pair.slice(eq + 1)); } catch (_) {}
-  }
-  return out;
-}
-
-function applyHash(h) {
-  if (!h) return false;
-  let used = false;
-  if (h.w) { inputEl.value = h.w.split(',').filter(Boolean).join('\n'); used = true; }
-  if (h.m) { setMode(h.m); used = true; }
-  if (h.s !== undefined && Number.isFinite(+h.s)) { setStock(+h.s); used = true; }
-  if (h.b !== undefined && Number.isFinite(+h.b)) { setBar(+h.b); used = true; }
-  if (h.o === '1') { setMonotonic(true); used = true; }
-  if (h.x === '1') { setOneSided(true); used = true; }
-  if (h.i) {
-    const arr = h.i.split('.').map(s => parseInt(s, 10));
-    setStartStack(arr);  // normaliseStack rejects invalid entries
-    used = true;
-  }
-  if (h.c === '1') { setCompact(true); used = true; }
-  return used;
+function applyHash(hash = location.hash) {
+  const state = stateLib.stateFromHash(hash, DEFAULT_STATE);
+  if (!state) return false;
+  applyState(state);
+  return true;
 }
 
 function updateHash() {
@@ -609,12 +690,18 @@ const persist = () => { saveState(); updateHash(); };
 const persistAndRecompute = (force) => { persist(); if (force || inputEl.value.trim()) compute(); };
 const debouncedCompute = debounce(compute, 250);
 const debouncedPersist = debounce(persist, 300);
+const scheduleCompute = () => {
+  ++currentReqId;  // invalidate any result already in flight before the debounce fires
+  if (inflightReqs.size > 0) disposeAlgoWorker(true);
+  else for (const reqId of [...indicatorTimers.keys()]) clearIndicator(reqId);
+  debouncedCompute();
+};
 
 // ---------- event wire-up ----------
 stockSlider.addEventListener('input', () => {
   if (!setStock(parseInt(stockSlider.value, 10))) return;
   debouncedPersist();
-  if (inputEl.value.trim()) debouncedCompute();
+  if (inputEl.value.trim()) scheduleCompute();
 });
 
 barSelect.addEventListener('change', () => { setBar(barSelect.value); persistAndRecompute(); });
@@ -632,6 +719,8 @@ oneSidedToggle.addEventListener('change', () => {
 // Click interface for the starting stack (event delegation).
 startButtonsEl.addEventListener('click', onStartButtonClick);
 startButtonsEl.addEventListener('contextmenu', onStartButtonContextMenu);
+startButtonsEl.addEventListener('keydown', onStartButtonKeyDown);
+startRemoveBtn.addEventListener('click', () => removeStartPlate());
 startClearBtn.addEventListener('click', (e) => {
   e.preventDefault(); e.stopPropagation();
   setStartStack(null);
@@ -660,9 +749,10 @@ $('modes').addEventListener('keydown', (e) => {
 });
 
 inputEl.addEventListener('input', () => {
+  clearInputErrorState();
   updateComputeBtn();
   debouncedPersist();
-  debouncedCompute();
+  scheduleCompute();
 });
 inputEl.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); compute(); }
@@ -688,6 +778,11 @@ compactBtn.addEventListener('click', () => {
 // Warmup dialog
 const warmupDialog = $('warmupDialog'), warmupTarget = $('warmupTarget'), warmupForm = $('warmupForm');
 
+function closeWarmupDialog() {
+  if (typeof warmupDialog.close === 'function') warmupDialog.close();
+  else warmupDialog.removeAttribute('open');
+}
+
 $('warmup').addEventListener('click', () => {
   if (inputEl.value.trim() && !confirm('Replace current sets with a generated warmup?')) return;
   warmupTarget.value = '140';
@@ -699,7 +794,7 @@ $('warmup').addEventListener('click', () => {
 warmupForm.addEventListener('submit', (e) => {
   e.preventDefault();
   const kg = Number(warmupTarget.value);
-  warmupDialog.close();
+  closeWarmupDialog();
   if (!Number.isFinite(kg) || kg <= 0 || kg > MAX_TOTAL_KG) return;
   inputEl.value = generateWarmup(kg).join('\n');
   updateComputeBtn();
@@ -708,29 +803,67 @@ warmupForm.addEventListener('submit', (e) => {
   inputEl.focus();
 });
 
-$('warmupCancel').addEventListener('click', () => warmupDialog.close());
+$('warmupCancel').addEventListener('click', closeWarmupDialog);
 
 // Copy shareable link
 const shareBtn = $('shareBtn');
-shareBtn.addEventListener('click', async () => {
-  const url = location.href;
-  const flash = () => {
-    const orig = shareBtn.textContent;
-    shareBtn.textContent = 'Copied!';
-    shareBtn.classList.add('copied');
-    setTimeout(() => { shareBtn.textContent = orig; shareBtn.classList.remove('copied'); }, 1400);
-  };
-  try {
-    await navigator.clipboard.writeText(url);
-    flash();
-  } catch (_) {
-    // Fallback for older browsers / non-secure contexts.
-    const tmp = document.createElement('input');
-    tmp.value = url; tmp.style.position = 'fixed'; tmp.style.opacity = '0';
-    document.body.appendChild(tmp); tmp.select();
-    try { document.execCommand('copy'); flash(); } catch (__) {}
-    document.body.removeChild(tmp);
+const SHARE_DEFAULT_LABEL = shareBtn.textContent;
+let shareFeedbackTimer = null;
+let copyAttemptId = 0;
+
+function showShareFeedback(label, className) {
+  if (shareFeedbackTimer !== null) clearTimeout(shareFeedbackTimer);
+  shareBtn.textContent = label;
+  shareBtn.classList.remove('copied', 'copy-failed');
+  shareBtn.classList.add(className);
+  shareFeedbackTimer = setTimeout(() => {
+    shareBtn.textContent = SHARE_DEFAULT_LABEL;
+    shareBtn.classList.remove('copied', 'copy-failed');
+    shareFeedbackTimer = null;
+  }, 1400);
+}
+
+function legacyCopy(text) {
+  const previousFocus = document.activeElement;
+  const proxy = document.createElement('textarea');
+  proxy.className = 'clipboard-proxy';
+  proxy.value = text;
+  proxy.setAttribute('readonly', '');
+  document.body.appendChild(proxy);
+  proxy.focus();
+  proxy.select();
+
+  let copied = false;
+  try { copied = document.execCommand('copy') === true; } catch (_) {}
+  document.body.removeChild(proxy);
+  if (previousFocus && typeof previousFocus.focus === 'function') {
+    try {
+      previousFocus.focus({ preventScroll: true });
+    } catch (_) {
+      try { previousFocus.focus(); } catch (__) {}
+    }
   }
+  return copied;
+}
+
+async function copyText(text) {
+  if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch (_) {}
+  }
+  try { return legacyCopy(text); } catch (_) { return false; }
+}
+
+shareBtn.addEventListener('click', async () => {
+  const attemptId = ++copyAttemptId;
+  persist();
+  const shareUrl = new URL(location.href);
+  shareUrl.hash = serializeHash() || '#w=';  // explicit defaults; never inherit recipient storage
+  const copied = await copyText(shareUrl.href);
+  if (attemptId !== copyAttemptId) return;
+  showShareFeedback(copied ? 'Copied!' : 'Copy failed', copied ? 'copied' : 'copy-failed');
 });
 
 // Platform-correct keyboard shortcut labels
@@ -752,43 +885,91 @@ buildStartButtons();
 renderStartViz();
 updateStartTotalDisplay();
 
-// Restore: storage first, then URL hash overlays its specific fields.
-loadStateFromStorage();
-applyHash(parseHash());
-setStock(parseInt(stockSlider.value, 10));
-setBar(BAR);
-setMode(CURRENT_MODE);  // ensure tabIndex/aria-checked reflect default on fresh load
+// A URL hash is a complete, deterministic state. Saved browser state is
+// consulted only when the URL carries no recognised Plate Loader state.
+applyState(DEFAULT_STATE);
+if (!applyHash(location.hash)) loadStateFromStorage();
 updateComputeBtn();
 // Auto-expand the start panel if there's a non-empty starting stack.
 if (startStack && startStack.length > 0) startDetails.open = true;
 if (inputEl.value.trim()) compute();
 
 window.addEventListener('hashchange', () => {
-  if (applyHash(parseHash())) { persist(); updateComputeBtn(); compute(); }
+  if (!applyHash(location.hash)) {
+    applyState(DEFAULT_STATE);
+    loadStateFromStorage();
+  }
+  updateComputeBtn();
+  if (startStack && startStack.length > 0) startDetails.open = true;
+  compute();
 });
 
 // ---------- Service worker registration (PWA / offline) ----------
-function showUpdateToast() {
-  if ($('updateToast')) return;
-  const t = document.createElement('div');
-  t.id = 'updateToast';
-  t.className = 'update-toast';
-  t.innerHTML = '<span>New version available.</span> <button type="button" id="updateReload">Reload</button>';
-  document.body.appendChild(t);
-  $('updateReload').addEventListener('click', () => location.reload());
+let pendingUpdateWorker = null;
+let updateReloading = false;
+
+function reloadForUpdate() {
+  if (updateReloading) return;
+  updateReloading = true;
+  persist();
+  location.reload();
+}
+
+function showUpdateToast(worker = null) {
+  if (worker) pendingUpdateWorker = worker;
+  let toast = $('updateToast');
+  if (toast) return;
+
+  toast = document.createElement('div');
+  toast.id = 'updateToast';
+  toast.className = 'update-toast';
+  toast.setAttribute('role', 'status');
+  toast.innerHTML = '<span>New version available.</span> <button type="button" id="updateReload">Reload</button>';
+  document.body.appendChild(toast);
+
+  $('updateReload').addEventListener('click', () => {
+    const workerToActivate = pendingUpdateWorker;
+    if (!workerToActivate || workerToActivate.state === 'activated' || workerToActivate.state === 'redundant') {
+      reloadForUpdate();
+      return;
+    }
+
+    navigator.serviceWorker.addEventListener('controllerchange', reloadForUpdate, { once: true });
+    try {
+      workerToActivate.postMessage({ type: 'SKIP_WAITING' });
+      setTimeout(reloadForUpdate, 1500);
+    } catch (_) {
+      reloadForUpdate();
+    }
+  });
 }
 
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
-    navigator.serviceWorker.register('sw.js', { scope: './' }).then((reg) => {
-      // If an update completed before our listener attached (e.g., on tab reopen),
-      // catch it now.
-      if (reg.waiting && navigator.serviceWorker.controller) showUpdateToast();
-      reg.addEventListener('updatefound', () => {
-        const newSw = reg.installing;
-        if (!newSw) return;
-        newSw.addEventListener('statechange', () => {
-          if (newSw.state === 'installed' && navigator.serviceWorker.controller) showUpdateToast();
+    let hasController = !!navigator.serviceWorker.controller;
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      const isUpdate = hasController;
+      hasController = true;
+      pendingUpdateWorker = null;
+      if (isUpdate) showUpdateToast();
+    });
+
+    navigator.serviceWorker.register('sw.js', {
+      scope: './',
+      updateViaCache: 'none',
+    }).then((registration) => {
+      if (registration.waiting && navigator.serviceWorker.controller) {
+        showUpdateToast(registration.waiting);
+      }
+      registration.addEventListener('updatefound', () => {
+        const newWorker = registration.installing;
+        if (!newWorker) return;
+        newWorker.addEventListener('statechange', () => {
+          if (
+            newWorker.state === 'installed' &&
+            navigator.serviceWorker.controller &&
+            registration.waiting
+          ) showUpdateToast(registration.waiting);
         });
       });
     }).catch(() => {});
