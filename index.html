@@ -57,6 +57,7 @@
       </div>
       <details class="start-block" id="startDetails">
         <summary>
+          <span class="disclosure-icon" aria-hidden="true"></span>
           <span class="start-summary-label">Bar starts at</span>
           <span id="startTotal" class="start-total" aria-live="polite">empty</span>
           <button type="button" class="start-clear-btn" id="startClear" aria-label="Clear starting stack" disabled>clear</button>
@@ -117,7 +118,8 @@
     <div class="legend" id="legend"></div>
   </div>
 
-  <div class="sets" id="output" aria-live="polite" aria-atomic="false" aria-relevant="additions text"></div>
+  <div id="outputStatus" class="visually-hidden" role="status" aria-live="polite" aria-atomic="true"></div>
+  <div class="sets" id="output"></div>
 
   <footer>Globally optimised across the whole sequence.</footer>
 </div>

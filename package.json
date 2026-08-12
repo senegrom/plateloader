@@ -1,13 +1,10 @@
 {
   "name": "plateloader",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "description": "Optimal plate arrangements for deadlift sets.",
   "scripts": {
     "build": "node scripts/build-site.js",
     "test": "node --test tests/*.test.js"
-  },
-  "engines": {
-    "node": ">=20"
   }
 }

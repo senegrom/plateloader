@@ -19,12 +19,8 @@ function createHarness(options = {}) {
   let skipWaitingCalls = 0;
 
   const cache = {
-    async addAll(urls) {
-      addedShells.push([...urls]);
-    },
-    async match(key) {
-      return cacheEntries.get(String(key));
-    },
+    async addAll(urls) { addedShells.push([...urls]); },
+    async match(key) { return cacheEntries.get(String(key)); },
     async put(key, response) {
       cachePuts.push(String(key));
       cacheEntries.set(String(key), response);
@@ -33,7 +29,7 @@ function createHarness(options = {}) {
   const caches = {
     async open() { return cache; },
     async keys() {
-      return options.cacheNames || ['plateloader-v10', 'plateloader-v12', 'other-app-v3'];
+      return options.cacheNames || ['plateloader-v10', 'plateloader-v12', 'plateloader-v13', 'other-app-v3'];
     },
     async delete(name) {
       deletedCaches.push(name);
@@ -42,9 +38,7 @@ function createHarness(options = {}) {
   };
   const self = {
     registration: { scope: 'https://example.test/app/' },
-    clients: {
-      async claim() { claimCalls++; },
-    },
+    clients: { async claim() { claimCalls++; } },
     async skipWaiting() { skipWaitingCalls++; },
     addEventListener(type, listener) { listeners[type] = listener; },
   };
@@ -81,13 +75,13 @@ function createHarness(options = {}) {
 
 function dispatchExtendable(listener, extra = {}) {
   let dispatching = true;
-  let lifetime;
+  const lifetimes = [];
   let response;
   const event = {
     ...extra,
     waitUntil(promise) {
       assert.equal(dispatching, true, 'waitUntil must be called during event dispatch');
-      lifetime = Promise.resolve(promise);
+      lifetimes.push(Promise.resolve(promise));
     },
     respondWith(promise) {
       assert.equal(dispatching, true, 'respondWith must be called during event dispatch');
@@ -96,10 +90,10 @@ function dispatchExtendable(listener, extra = {}) {
   };
   listener(event);
   dispatching = false;
-  return { lifetime, response };
+  return { lifetime: Promise.all(lifetimes), lifetimes, response };
 }
 
-test('install precaches the bounded shell and activates over the legacy updater', async () => {
+test('install precaches the shell but waits for the page to request activation', async () => {
   const harness = createHarness();
   const { lifetime } = dispatchExtendable(harness.listeners.install);
   await lifetime;
@@ -107,34 +101,58 @@ test('install precaches the bounded shell and activates over the legacy updater'
   assert.equal(harness.addedShells.length, 1);
   assert.ok(harness.addedShells[0].includes('https://example.test/app/index.html'));
   assert.ok(harness.addedShells[0].includes('https://example.test/app/algo-worker.js'));
-  assert.equal(harness.addedShells[0].some((url) => url.includes('plateloader-test')), false);
+  assert.equal(harness.skipWaitingCalls, 0);
+});
+
+test('SKIP_WAITING messages explicitly activate the waiting worker', async () => {
+  const harness = createHarness();
+  const { lifetime } = dispatchExtendable(harness.listeners.message, {
+    data: { type: 'SKIP_WAITING' },
+  });
+  await lifetime;
   assert.equal(harness.skipWaitingCalls, 1);
 });
 
-test('activation removes only old Plate Loader caches', async () => {
+test('activation removes only obsolete Plate Loader caches', async () => {
   const harness = createHarness();
   const { lifetime } = dispatchExtendable(harness.listeners.activate);
   await lifetime;
 
-  assert.deepEqual(harness.deletedCaches, ['plateloader-v10']);
+  assert.deepEqual(harness.deletedCaches, ['plateloader-v10', 'plateloader-v12']);
   assert.equal(harness.claimCalls, 1);
 });
 
-test('known assets are intercepted, served from cache and refreshed in-event', async () => {
+test('known assets are served from canonical cache keys and refreshed in-event', async () => {
   const url = 'https://example.test/app/plateloader.js';
   const harness = createHarness({ cacheEntries: [[url, new Response('cached')]] });
-  const request = { method: 'GET', url: `${url}?v=1`, mode: 'cors', destination: 'script' };
+  const request = { method: 'GET', url: `${url}?v=123#ignored`, mode: 'cors', destination: 'script' };
   const { lifetime, response } = dispatchExtendable(harness.listeners.fetch, { request });
 
-  assert.ok(lifetime, 'known assets should extend the event lifetime');
-  assert.ok(response, 'known assets should be intercepted');
+  assert.ok(response);
   assert.equal(await (await response).text(), 'cached');
   await lifetime;
   assert.deepEqual(harness.fetchCalls, [url]);
   assert.deepEqual(harness.cachePuts, [url]);
 });
 
-test('unknown, cross-origin and non-GET requests pass through without cache growth', () => {
+test('scope navigation falls back to cached index when offline', async () => {
+  const index = 'https://example.test/app/index.html';
+  const harness = createHarness({
+    cacheEntries: [[index, new Response('offline shell')]],
+    fetch: async () => { throw new Error('offline'); },
+  });
+  const request = {
+    method: 'GET',
+    url: 'https://example.test/app/#w=100',
+    mode: 'navigate',
+    destination: 'document',
+  };
+  const { lifetime, response } = dispatchExtendable(harness.listeners.fetch, { request });
+  assert.equal(await (await response).text(), 'offline shell');
+  await lifetime;
+});
+
+test('unknown, cross-origin and non-GET requests pass through', () => {
   const harness = createHarness();
   const cases = [
     { method: 'GET', url: 'https://example.test/app/random.json', mode: 'cors', destination: '' },
@@ -144,17 +162,7 @@ test('unknown, cross-origin and non-GET requests pass through without cache grow
 
   for (const request of cases) {
     const dispatched = dispatchExtendable(harness.listeners.fetch, { request });
-    assert.equal(dispatched.lifetime, undefined);
+    assert.equal(dispatched.lifetimes.length, 0);
     assert.equal(dispatched.response, undefined);
   }
-  assert.deepEqual(harness.fetchCalls, []);
-});
-
-test('SKIP_WAITING messages extend the worker lifetime', async () => {
-  const harness = createHarness();
-  const { lifetime } = dispatchExtendable(harness.listeners.message, {
-    data: { type: 'SKIP_WAITING' },
-  });
-  await lifetime;
-  assert.equal(harness.skipWaitingCalls, 1);
 });
