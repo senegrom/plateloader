@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Plate Loader — Deadlift sets · Carl Georg Heise</title>
+<meta name="description" content="Plate Loader: enter a sequence of deadlift sets and get the optimal plate arrangement that minimises plate moves between sets. Configurable bar weight, plate stock, and warmup generator."/>
+<meta name="theme-color" content="#0e0f12"/>
+<link rel="canonical" href="https://carlgeorgheise.com/app/plateloader"/>
+<meta property="og:title" content="Plate Loader — Deadlift sets"/>
+<meta property="og:description" content="Enter a sequence of deadlift sets, get the optimal plate arrangement that minimises plate moves between sets."/>
+<meta property="og:type" content="website"/>
+<meta property="og:url" content="https://carlgeorgheise.com/app/plateloader"/>
+<meta property="og:image" content="https://carlgeorgheise.com/og-card.png"/>
+<meta name="twitter:card" content="summary_large_image"/>
+<meta name="twitter:title" content="Plate Loader — Deadlift sets"/>
+<meta name="twitter:description" content="Enter a sequence of deadlift sets, get the optimal plate arrangement that minimises plate moves between sets."/>
+<meta name="twitter:image" content="https://carlgeorgheise.com/og-card.png"/>
+<link rel="icon" type="image/png" sizes="192x192" href="icons/plateloader-192.png"/>
+<link rel="icon" type="image/png" sizes="512x512" href="icons/plateloader-512.png"/>
+<link rel="apple-touch-icon" href="icons/plateloader-180.png"/>
+<link rel="manifest" href="manifest.json"/>
+<link rel="preload" href="fonts/Inter-400.woff2" as="font" type="font/woff2" crossorigin/>
+<link rel="preload" href="fonts/BebasNeue-400.woff2" as="font" type="font/woff2" crossorigin/>
+<link rel="stylesheet" href="plateloader.css"/>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Plate <span class="accent">Loader</span></h1>
+    <div class="sub" id="barSub">Deadlift · 20 kg bar</div>
+  </header>
+  <noscript><div class="noscript-message">This calculator requires JavaScript — everything runs locally in your browser; nothing is sent to a server.</div></noscript>
+
+  <div class="panel config-panel">
+    <h2 id="lbl-sets">Sets — total weight in kg</h2>
+    <textarea id="input" rows="5" placeholder="60&#10;80&#10;100&#10;120&#10;140" aria-labelledby="lbl-sets" aria-describedby="hint-sets"></textarea>
+    <div class="hint" id="hint-sets">One number per line, comma, semicolon, or space (up to 50 sets). Plates load <span id="loadScopeLabel">symmetrically</span>. Each plate added or removed counts as <code>1 move</code> (a swap = 2 moves).</div>
+
+    <div class="config-grid">
+      <div>
+        <h2 id="lbl-bar">Bar weight</h2>
+        <select id="barWeight" aria-labelledby="lbl-bar">
+          <option value="0">0 kg (plates only)</option>
+          <option value="10">10 kg (training bar)</option>
+          <option value="15">15 kg (women's Olympic)</option>
+          <option value="20" selected>20 kg (men's Olympic)</option>
+          <option value="25">25 kg (heavy competition)</option>
+        </select>
+      </div>
+      <div>
+        <h2 id="lbl-stock">Plate stock — <span id="stockScopeLabel">max per side</span></h2>
+        <div class="stock-row">
+          <input type="range" id="stockSlider" min="0" max="6" step="1" value="2" aria-labelledby="lbl-stock" />
+          <span class="stock-value"><b id="stockValue">2</b><span class="stock-unit"> of each</span></span>
+        </div>
+      </div>
+      <details class="start-block" id="startDetails">
+        <summary>
+          <span class="disclosure-icon" aria-hidden="true"></span>
+          <span class="start-summary-label">Bar starts at</span>
+          <span id="startTotal" class="start-total" aria-live="polite">empty</span>
+          <button type="button" class="start-clear-btn" id="startClear" aria-label="Clear starting stack" disabled>clear</button>
+        </summary>
+        <div class="start-builder" aria-labelledby="lbl-start" aria-describedby="hint-start">
+          <h2 id="lbl-start" class="visually-hidden">Bar starts at</h2>
+          <div class="start-viz" id="startViz" role="img" aria-label="Starting bar configuration"></div>
+          <div class="start-buttons" id="startButtons" role="group" aria-label="Starting plate choices"></div>
+          <div class="start-actions">
+            <button type="button" class="start-clear-btn start-remove-btn" id="startRemove" disabled>Remove outermost</button>
+          </div>
+          <div class="hint" id="hint-start">Click or press Enter to add · use Remove outermost on touch · Shift-click, Delete, or right-click removes that type · order matters.</div>
+        </div>
+      </details>
+    </div>
+
+    <label class="constraint-toggle">
+      <input type="checkbox" id="monotonicToggle" />
+      <span>Monotonic stack — heaviest plates always innermost</span>
+    </label>
+    <label class="constraint-toggle">
+      <input type="checkbox" id="oneSidedToggle" />
+      <span>One-sided — load plates on one side only</span>
+    </label>
+
+    <h2 id="lbl-mode">Optimisation mode</h2>
+    <div class="modes" id="modes" role="radiogroup" aria-labelledby="lbl-mode">
+      <button type="button" class="mode-btn active" data-mode="count" role="radio" aria-checked="true">
+        <span class="label">Min plate moves</span>
+        <span class="desc">Fewest moves overall. Tiebreak: lighter kg moved.</span>
+      </button>
+      <button type="button" class="mode-btn" data-mode="kg" role="radio" aria-checked="false">
+        <span class="label">Min total kg moved</span>
+        <span class="desc">Sum of plate weights handled. Avoids lifting heavy plates.</span>
+      </button>
+      <button type="button" class="mode-btn" data-mode="sqrt" role="radio" aria-checked="false">
+        <span class="label">Min Σ√kg moved</span>
+        <span class="desc">Sublinear: prefers many small over one big.</span>
+      </button>
+    </div>
+
+    <div class="row config-actions">
+      <button type="button" class="btn" id="go">Compute</button>
+      <button type="button" class="btn secondary" id="example">Load example</button>
+      <button type="button" class="btn secondary" id="warmup">Generate warmup</button>
+      <button type="button" class="btn secondary" id="compactToggle" aria-pressed="false">Compact view</button>
+      <button type="button" class="btn secondary" id="shareBtn" aria-label="Copy shareable link" aria-live="polite">Copy link</button>
+      <button type="button" class="btn secondary" id="clear">Clear</button>
+    </div>
+    <div class="hint shortcut-hint">
+      <kbd id="shortcutKbd">Ctrl+Enter</kbd> compute · <kbd id="shortcutFocusKbd">Ctrl+K</kbd> focus input · auto-computes as you type · URL updates for sharing
+    </div>
+  </div>
+
+  <div class="panel" id="summaryPanel" hidden>
+    <h2>Summary</h2>
+    <div class="summary" id="summary"></div>
+    <div class="legend" id="legend"></div>
+  </div>
+
+  <div id="outputStatus" class="visually-hidden" role="status" aria-live="polite" aria-atomic="true"></div>
+  <div class="sets" id="output"></div>
+
+  <footer>Globally optimised across the whole sequence.</footer>
+</div>
+
+<dialog id="warmupDialog" class="warmup" aria-labelledby="lbl-warmup">
+  <form method="dialog" id="warmupForm">
+    <h2 id="lbl-warmup">Generate warmup</h2>
+    <label for="warmupTarget" class="warmup-label">Target weight (kg)</label>
+    <input type="number" id="warmupTarget" min="1" max="1000" step="any" value="140" required inputmode="decimal" aria-describedby="warmupNote" />
+    <div class="warmup-note" id="warmupNote">Will create sets at 50%, 70%, 85%, 95% and 100% (rounded to 2.5 kg).</div>
+    <div class="actions">
+      <button type="button" class="btn secondary" id="warmupCancel">Cancel</button>
+      <button type="submit" class="btn">Generate</button>
+    </div>
+  </form>
+</dialog>
+
+<script src="algo.js" defer></script>
+<script src="state.js" defer></script>
+<script src="plateloader.js" defer></script>
+</body>
+</html>
