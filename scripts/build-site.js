@@ -4,119 +4,177 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const root = fs.realpathSync(path.resolve(__dirname, '..'));
-const defaultOutput = path.join(root, '_site');
-const requestedOutput = path.resolve(root, process.argv[2] || '_site');
-const files = [
-  'plateloader.css',
-  'plateloader.js',
-  'state.js',
-  'algo.js',
-  'algo-worker.js',
-  'manifest.json',
-  'sw.js',
+if (process.argv.length > 2) {
+  throw new Error('The build output is fixed at _site; custom output paths are not supported.');
+}
+const output = path.join(root, '_site');
+const temporaryOutput = `${output}.tmp-${process.pid}`;
+const textAssets = [
+  ['index.html', minifyHtml],
+  ['plateloader.css', minifyCss],
+  ['plateloader.js', minifyJavaScript],
+  ['state.js', minifyJavaScript],
+  ['algo.js', minifyJavaScript],
+  ['algo-worker.js', minifyJavaScript],
+  ['sw.js', minifyJavaScript],
+  ['manifest.json', minifyJson],
 ];
-const directories = ['fonts', 'icons'];
+const assetDirectories = ['fonts', 'icons'];
 
-function resolveRealTarget(target) {
-  const tail = [];
-  let cursor = target;
-  while (!fs.existsSync(cursor)) {
-    const parent = path.dirname(cursor);
-    if (parent === cursor) break;
-    tail.unshift(path.basename(cursor));
-    cursor = parent;
+function assertRegularFile(file) {
+  const source = path.join(root, file);
+  if (!fs.existsSync(source) || fs.lstatSync(source).isSymbolicLink() || !fs.statSync(source).isFile()) {
+    throw new Error(`Invalid build source file: ${source}`);
   }
-  return path.join(fs.realpathSync(cursor), ...tail);
 }
 
-function isWithin(parent, child) {
-  const relative = path.relative(parent, child);
-  return relative === '' || (
-    !path.isAbsolute(relative) &&
-    relative !== '..' &&
-    !relative.startsWith(`..${path.sep}`)
-  );
-}
-
-function collectGeneratedPaths() {
-  const allowed = new Map([
-    ['index.html', 'file'],
-    ['plateloader.html', 'file'], // legacy output removed by this build
-    ...files.map((file) => [file, 'file']),
-    ...directories.map((directory) => [directory, 'directory']),
-  ]);
-  const addDirectory = (sourceRoot, relativeRoot) => {
-    for (const entry of fs.readdirSync(sourceRoot, { withFileTypes: true })) {
-      if (entry.isSymbolicLink()) {
-        throw new Error(`Refusing to copy symbolic link: ${path.join(relativeRoot, entry.name)}`);
-      }
-      const relative = path.join(relativeRoot, entry.name);
-      allowed.set(relative, entry.isDirectory() ? 'directory' : 'file');
-      if (entry.isDirectory()) addDirectory(path.join(sourceRoot, entry.name), relative);
+function assertDirectory(directory) {
+  const source = path.join(root, directory);
+  if (!fs.existsSync(source) || fs.lstatSync(source).isSymbolicLink() || !fs.statSync(source).isDirectory()) {
+    throw new Error(`Invalid build source directory: ${source}`);
+  }
+  const inspect = (current) => {
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })) {
+      const target = path.join(current, entry.name);
+      if (entry.isSymbolicLink()) throw new Error(`Refusing to copy symbolic link: ${target}`);
+      if (entry.isDirectory()) inspect(target);
+      else if (!entry.isFile()) throw new Error(`Unsupported build source entry: ${target}`);
     }
   };
-  for (const directory of directories) {
-    addDirectory(path.join(root, directory), directory);
-  }
-  return allowed;
+  inspect(source);
 }
 
-function assertSources() {
-  for (const file of ['plateloader.html', ...files]) {
-    const source = path.join(root, file);
-    if (!fs.existsSync(source) || fs.lstatSync(source).isSymbolicLink() || !fs.statSync(source).isFile()) {
-      throw new Error(`Invalid build source file: ${source}`);
-    }
-  }
-  for (const directory of directories) {
-    const source = path.join(root, directory);
-    if (!fs.existsSync(source) || fs.lstatSync(source).isSymbolicLink() || !fs.statSync(source).isDirectory()) {
-      throw new Error(`Invalid build source directory: ${source}`);
-    }
-  }
+function minifyHtml(source) {
+  return source
+    .replace(/<!--(?!\[if)[\s\S]*?-->/g, '')
+    .replace(/>\s+</g, '><')
+    .replace(/[ \t]+\n/g, '\n')
+    .trim();
 }
 
-function assertSafeOutput(output, allowed) {
-  if (fs.existsSync(requestedOutput) && fs.lstatSync(requestedOutput).isSymbolicLink()) {
-    throw new Error(`Refusing symlinked build output: ${requestedOutput}`);
-  }
-  if (isWithin(output, root)) {
-    throw new Error(`Refusing to replace repository or an ancestor: ${output}`);
-  }
-  if (isWithin(root, output) && output !== defaultOutput) {
-    throw new Error(`Only ${defaultOutput} may be replaced inside the repository.`);
-  }
-  if (!fs.existsSync(output)) return;
-  if (!fs.statSync(output).isDirectory()) {
-    throw new Error(`Build output exists and is not a directory: ${output}`);
+function minifyCss(source) {
+  let outputText = '';
+  let quote = null;
+  let escaped = false;
+  let comment = false;
+  let pendingSpace = false;
+  const punctuation = new Set(['{', '}', ':', ';', ',', '>', '+', '~', '(', ')']);
+
+  for (let index = 0; index < source.length; index++) {
+    const character = source[index];
+    const next = source[index + 1];
+
+    if (comment) {
+      if (character === '*' && next === '/') {
+        comment = false;
+        index++;
+      }
+      continue;
+    }
+
+    if (quote) {
+      outputText += character;
+      if (escaped) escaped = false;
+      else if (character === '\\') escaped = true;
+      else if (character === quote) quote = null;
+      continue;
+    }
+
+    if (character === '/' && next === '*') {
+      comment = true;
+      index++;
+      continue;
+    }
+
+    if (character === '"' || character === "'") {
+      if (pendingSpace) {
+        const previous = outputText.at(-1);
+        if (previous && !punctuation.has(previous)) outputText += ' ';
+        pendingSpace = false;
+      }
+      quote = character;
+      outputText += character;
+      continue;
+    }
+
+    if (/\s/.test(character)) {
+      pendingSpace = true;
+      continue;
+    }
+
+    if (pendingSpace) {
+      const previous = outputText.at(-1);
+      if (previous && !punctuation.has(previous) && !punctuation.has(character)) outputText += ' ';
+      pendingSpace = false;
+    }
+
+    if (punctuation.has(character) && outputText.endsWith(' ')) outputText = outputText.slice(0, -1);
+    outputText += character;
   }
 
-  const unexpected = [];
-  const inspect = (directory, relativeRoot = '') => {
-    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
-      const relative = path.join(relativeRoot, entry.name);
-      const type = entry.isDirectory() ? 'directory' : entry.isFile() ? 'file' : 'other';
-      if (entry.isSymbolicLink() || allowed.get(relative) !== type) {
-        unexpected.push(relative);
+  if (comment || quote) throw new Error('Unterminated CSS comment or string.');
+  return outputText.replace(/;}/g, '}').trim();
+}
+
+function minifyJavaScript(source) {
+  const outputLines = [];
+  let inTemplate = false;
+
+  for (const originalLine of source.replace(/\r\n?/g, '\n').split('\n')) {
+    const trimmed = originalLine.trim();
+    if (!inTemplate && (trimmed === '' || trimmed.startsWith('//'))) continue;
+
+    const line = inTemplate ? originalLine.replace(/[ \t]+$/g, '') : trimmed;
+    outputLines.push(line);
+
+    let escaped = false;
+    for (let index = 0; index < originalLine.length; index++) {
+      const character = originalLine[index];
+      if (escaped) {
+        escaped = false;
         continue;
       }
-      if (entry.isDirectory()) inspect(path.join(directory, entry.name), relative);
+      if (character === '\\') {
+        escaped = true;
+        continue;
+      }
+      if (character === '`') inTemplate = !inTemplate;
     }
-  };
-  inspect(output);
-  if (unexpected.length) {
-    throw new Error(`Refusing to delete non-build files in ${output}: ${unexpected.join(', ')}`);
+  }
+
+  if (inTemplate) throw new Error('Unterminated JavaScript template literal.');
+  return outputLines.join('\n').trim();
+}
+
+function minifyJson(source) {
+  return JSON.stringify(JSON.parse(source));
+}
+
+function build() {
+  for (const [file] of textAssets) assertRegularFile(file);
+  for (const directory of assetDirectories) assertDirectory(directory);
+
+  if (fs.existsSync(output) && fs.lstatSync(output).isSymbolicLink()) {
+    throw new Error(`Refusing symlinked build output: ${output}`);
+  }
+  if (fs.existsSync(temporaryOutput)) fs.rmSync(temporaryOutput, { recursive: true, force: true });
+  fs.mkdirSync(temporaryOutput, { recursive: true });
+
+  try {
+    for (const [file, transform] of textAssets) {
+      const source = fs.readFileSync(path.join(root, file), 'utf8');
+      fs.writeFileSync(path.join(temporaryOutput, file), transform(source));
+    }
+    for (const directory of assetDirectories) {
+      fs.cpSync(path.join(root, directory), path.join(temporaryOutput, directory), { recursive: true });
+    }
+
+    fs.rmSync(output, { recursive: true, force: true });
+    fs.renameSync(temporaryOutput, output);
+  } catch (error) {
+    fs.rmSync(temporaryOutput, { recursive: true, force: true });
+    throw error;
   }
 }
 
-const output = resolveRealTarget(requestedOutput);
-assertSources();
-const generatedPaths = collectGeneratedPaths();
-assertSafeOutput(output, generatedPaths);
-fs.rmSync(output, { recursive: true, force: true });
-fs.mkdirSync(output, { recursive: true });
-fs.copyFileSync(path.join(root, 'plateloader.html'), path.join(output, 'index.html'));
-for (const file of files) fs.copyFileSync(path.join(root, file), path.join(output, file));
-for (const directory of directories) {
-  fs.cpSync(path.join(root, directory), path.join(output, directory), { recursive: true });
-}
+build();

@@ -102,6 +102,16 @@ const readInput = () => stateLib.parseWeightInput(inputEl.value, {
   maxSets: MAX_SETS,
   maxKg: MAX_TOTAL_KG,
 });
+const outputStatusEl = $('outputStatus');
+let statusAnnouncementId = 0;
+
+function announceStatus(message) {
+  const announcementId = ++statusAnnouncementId;
+  outputStatusEl.textContent = '';
+  requestAnimationFrame(() => {
+    if (announcementId === statusAnnouncementId) outputStatusEl.textContent = message;
+  });
+}
 
 function renderInputErrors(errors) {
   const visible = errors.slice(0, 5);
@@ -132,18 +142,7 @@ function renderPlate(plateIdx, opts) {
   return `<div class="${cls}" title="${p.kg} kg plate" aria-hidden="true"><span class="plate-label">${p.label}</span></div>`;
 }
 
-function barDescription(stack) {
-  const counts = {};
-  for (const plateIdx of stack) {
-    const label = PLATES[plateIdx].label;
-    counts[label] = (counts[label] || 0) + 1;
-  }
-  if (!Object.keys(counts).length) return `${BAR} kg bar only`;
-  const plates = Object.entries(counts)
-    .map(([label, count]) => `${count} times ${label} kg`)
-    .join(', ');
-  return `${BAR} kg bar with ${plates}${oneSided ? '' : ' per side'}`;
-}
+const barDescription = (stack) => stateLib.describeBar(stack, PLATES, BAR, oneSided);
 
 function renderBarRow(stack, prevStack = [], options = {}) {
   const animateChanges = options.animateChanges !== false;
@@ -299,6 +298,13 @@ function renderResults(results, hasStart) {
   } else {
     summaryPanel.hidden = true;
   }
+
+  const invalidSets = Math.max(0, userSetCount - validSets);
+  const validLabel = `${validSets} valid set${validSets === 1 ? '' : 's'}`;
+  const invalidLabel = invalidSets
+    ? `; ${invalidSets} invalid set${invalidSets === 1 ? '' : 's'}`
+    : '';
+  announceStatus(`Results updated: ${validLabel}${invalidLabel}.`);
 }
 
 // ---------- wire-up ----------
@@ -430,6 +436,7 @@ function setOneSided(on) {
   if (stockLbl) stockLbl.textContent = oneSided ? 'max of each' : 'max per side';
   const loadLbl = $('loadScopeLabel');
   if (loadLbl) loadLbl.textContent = oneSided ? 'on one side only' : 'symmetrically';
+  updateWarmupNote();
   updateStartTotalDisplay();
   renderStartViz();
 }
@@ -519,13 +526,13 @@ function setMode(m) {
   });
 }
 
-function setStock(n) {
-  n = Math.max(0, Math.min(STOCK_MAX, n | 0));
-  const changed = n !== plateMax[0];
-  stockSlider.style.setProperty('--fill', (n * 100 / STOCK_MAX) + '%');
-  stockSlider.value = String(n);
-  stockValue.textContent = String(n);
-  plateMax.fill(n);
+function setStock(value) {
+  const stock = stateLib.clampInteger(value, 0, STOCK_MAX, DEFAULT_STOCK);
+  const changed = stock !== plateMax[0];
+  stockSlider.style.setProperty('--fill', (stock * 100 / STOCK_MAX) + '%');
+  stockSlider.value = String(stock);
+  stockValue.textContent = String(stock);
+  plateMax.fill(stock);
   return changed;
 }
 
@@ -560,12 +567,14 @@ function compute(forceSync) {
   const summaryPanel = $('summaryPanel');
   if (errors.length) {
     renderInputErrors(errors);
+    announceStatus(`Set list has ${errors.length} error${errors.length === 1 ? '' : 's'}.`);
     return;
   }
   clearInputErrorState();
   if (weights.length === 0) {
     out.innerHTML = '<div class="panel empty-state">Enter some weights above.</div>';
     summaryPanel.hidden = true;
+    announceStatus('No sets entered.');
     return;
   }
 
@@ -578,6 +587,7 @@ function compute(forceSync) {
     if (currentReqId !== reqId) return;
     out.innerHTML = '<div class="panel computing-indicator">Computing…</div>';
     summaryPanel.hidden = true;
+    announceStatus('Computing plate sequence.');
   };
 
   const worker = forceSync ? null : ensureAlgoWorker();
@@ -609,17 +619,19 @@ document.addEventListener('visibilitychange', () => {
 });
 
 // ---------- warmup generator ----------
-// 50/70/85/95/100% rounded to nearest 2.5 kg, deduplicated, ≥ BAR.
-function generateWarmup(targetKg) {
-  const seen = new Set();
-  const out = [];
-  for (const pct of [0.50, 0.70, 0.85, 0.95, 1.00]) {
-    let w = Math.round((targetKg * pct) / 2.5) * 2.5;
-    if (w < BAR) w = BAR;
-    if (!seen.has(w)) { seen.add(w); out.push(w); }
-  }
-  return out;
+// 50/70/85/95/100%, rounded to the smallest achievable total increment.
+const warmupIncrement = () => sided() * 1.25;
+
+function updateWarmupNote() {
+  const note = $('warmupNote');
+  if (!note) return;
+  note.textContent = `Will create sets at 50%, 70%, 85%, 95% and 100% (rounded to ${fmtKg(warmupIncrement())} kg).`;
 }
+
+const generateWarmup = (targetKg) => stateLib.generateWarmup(targetKg, {
+  bar: BAR,
+  sided: sided(),
+});
 
 // ---------- state persistence (localStorage + URL hash) ----------
 const snapshotState = () => ({
@@ -641,12 +653,13 @@ function applyState(state) {
   const next = state && typeof state === 'object' ? state : DEFAULT_STATE;
   inputEl.value = typeof next.input === 'string' ? next.input : DEFAULT_STATE.input;
   setMode(['count', 'kg', 'sqrt'].includes(next.mode) ? next.mode : DEFAULT_MODE);
-  setStock(Number.isFinite(next.stock) ? next.stock : DEFAULT_STOCK);
+  setStock(next.stock);
   setBar(Number.isFinite(next.bar) ? next.bar : DEFAULT_BAR);
   setMonotonic(next.monotonic === true);
   setOneSided(next.oneSided === true);
   setStartStack(Array.isArray(next.startStack) ? next.startStack : null);
   setCompact(next.compact === true);
+  startDetails.open = Boolean(startStack && startStack.length);
 }
 
 function loadStateFromStorage() {
@@ -871,13 +884,13 @@ const isMac = /Mac|iPhone|iPad|iPod/.test(navigator.platform || '') || /Mac/.tes
 const kbd = $('shortcutKbd'); if (kbd) kbd.textContent = isMac ? '⌘+Enter' : 'Ctrl+Enter';
 const kbdFocus = $('shortcutFocusKbd'); if (kbdFocus) kbdFocus.textContent = isMac ? '⌘+K' : 'Ctrl+K';
 
-// Cmd/Ctrl+K focuses the input from anywhere on the page
+// Cmd/Ctrl+K focuses the input, except while the modal dialog owns focus.
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'k' && (e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey) {
-    e.preventDefault();
-    inputEl.focus();
-    inputEl.select();
-  }
+  if (e.key !== 'k' || (!e.ctrlKey && !e.metaKey) || e.shiftKey || e.altKey) return;
+  if (warmupDialog.open || warmupDialog.hasAttribute('open')) return;
+  e.preventDefault();
+  inputEl.focus();
+  inputEl.select();
 });
 
 // Build dynamic UI before restoring state.
@@ -890,8 +903,6 @@ updateStartTotalDisplay();
 applyState(DEFAULT_STATE);
 if (!applyHash(location.hash)) loadStateFromStorage();
 updateComputeBtn();
-// Auto-expand the start panel if there's a non-empty starting stack.
-if (startStack && startStack.length > 0) startDetails.open = true;
 if (inputEl.value.trim()) compute();
 
 window.addEventListener('hashchange', () => {
@@ -900,7 +911,6 @@ window.addEventListener('hashchange', () => {
     loadStateFromStorage();
   }
   updateComputeBtn();
-  if (startStack && startStack.length > 0) startDetails.open = true;
   compute();
 });
 
@@ -951,7 +961,7 @@ if ('serviceWorker' in navigator) {
       const isUpdate = hasController;
       hasController = true;
       pendingUpdateWorker = null;
-      if (isUpdate) showUpdateToast();
+      if (isUpdate && !updateReloading) showUpdateToast();
     });
 
     navigator.serviceWorker.register('sw.js', {

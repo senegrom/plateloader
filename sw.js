@@ -2,7 +2,7 @@
 // Known shell assets use stale-while-revalidate; unrelated requests pass through.
 
 const CACHE_PREFIX = 'plateloader-';
-const CACHE_VERSION = `${CACHE_PREFIX}v12`;
+const CACHE_VERSION = `${CACHE_PREFIX}v13`;
 const APP_SCOPE = self.registration.scope;
 const appUrl = (path) => new URL(path, APP_SCOPE).href;
 const INDEX_URL = appUrl('index.html');
@@ -44,12 +44,12 @@ function cacheKeyFor(request) {
 }
 
 self.addEventListener('install', (event) => {
+  // Stay in the waiting state until the page's Reload action explicitly asks
+  // this worker to activate. That prevents an old page from being controlled
+  // by a new asset protocol before it reloads.
   event.waitUntil(
     caches.open(CACHE_VERSION)
       .then((cache) => cache.addAll(APP_SHELL))
-      // This release must also update clients running the legacy reload-only
-      // updater. The page still supports a waiting worker for future changes.
-      .then(() => self.skipWaiting())
   );
 });
 

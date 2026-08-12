@@ -1,10 +1,51 @@
 'use strict';
 
-// Pure input and URL-state helpers shared by the browser app and Node tests.
+// Pure input, URL-state and presentation-math helpers shared by the app and tests.
 function buildStateLib() {
   const KNOWN_KEYS = new Set(['w', 'm', 's', 'b', 'i', 'o', 'x', 'c']);
   const DECIMAL = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/;
   const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
+
+
+  function clampInteger(value, min, max, fallback) {
+    const parsed = Number(value);
+    const fallbackNumber = Number.isFinite(Number(fallback)) ? Number(fallback) : min;
+    const finite = Number.isFinite(parsed) ? parsed : fallbackNumber;
+    return Math.max(min, Math.min(max, Math.trunc(finite)));
+  }
+
+  function describeBar(stack, plates, bar, oneSided) {
+    const safeStack = Array.isArray(stack) ? stack : [];
+    if (safeStack.length === 0) return `${bar} kg bar only`;
+    const orderedPlates = safeStack
+      .map((plateIdx) => `${plates[plateIdx].label} kg`)
+      .join(', ');
+    const scope = oneSided ? 'loaded side' : 'each side';
+    return `${bar} kg bar; ${scope}, from collar outward: ${orderedPlates}`;
+  }
+
+  function generateWarmup(targetKg, options = {}) {
+    const bar = Number.isFinite(options.bar) && options.bar >= 0 ? options.bar : 20;
+    const sided = options.sided === 1 ? 1 : 2;
+    const increment = sided * 1.25;
+    const minimum = bar > 0 ? bar : increment;
+    const percentages = Array.isArray(options.percentages)
+      ? options.percentages
+      : [0.50, 0.70, 0.85, 0.95, 1.00];
+    const seen = new Set();
+    const weights = [];
+
+    for (const percentage of percentages) {
+      let weight = Math.round((targetKg * percentage) / increment) * increment;
+      weight = Number(weight.toFixed(2));
+      if (weight < minimum) weight = minimum;
+      if (!seen.has(weight)) {
+        seen.add(weight);
+        weights.push(weight);
+      }
+    }
+    return weights;
+  }
 
   function parseWeightInput(text, options = {}) {
     const maxSets = Number.isInteger(options.maxSets) && options.maxSets > 0
@@ -71,9 +112,10 @@ function buildStateLib() {
     };
 
     if (hasOwn(params, 'w')) {
-      // Commas preserve compatibility with earlier links; newly generated
-      // links percent-encode the raw textarea so malformed input is not lost.
-      state.input = String(params.w).replace(/\r\n?/g, '\n').replace(/,/g, '\n');
+      // Preserve the sender's textarea exactly (apart from normalising CRLF).
+      // Legacy comma-separated links still work because the input parser treats
+      // commas as separators without rewriting what the user sees.
+      state.input = String(params.w).replace(/\r\n?/g, '\n');
     }
     if (['count', 'kg', 'sqrt'].includes(params.m)) state.mode = params.m;
     if (hasOwn(params, 's') && DECIMAL.test(params.s)) {
@@ -97,7 +139,7 @@ function buildStateLib() {
     return state;
   }
 
-  return { parseWeightInput, parseHash, stateFromHash };
+  return { clampInteger, describeBar, generateWarmup, parseWeightInput, parseHash, stateFromHash };
 }
 
 if (typeof module !== 'undefined' && module.exports) {
