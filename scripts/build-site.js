@@ -1,5 +1,6 @@
 'use strict';
 
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 
@@ -7,17 +8,20 @@ const root = fs.realpathSync(path.resolve(__dirname, '..'));
 if (process.argv.length > 2) {
   throw new Error('The build output is fixed at _site; custom output paths are not supported.');
 }
+
 const output = path.join(root, '_site');
 const temporaryOutput = `${output}.tmp-${process.pid}`;
+const backupOutput = `${output}.old-${process.pid}`;
+const BUILD_PLACEHOLDER = '__PLATELOADER_BUILD_ID__';
 const textAssets = [
-  ['index.html', minifyHtml],
-  ['plateloader.css', minifyCss],
-  ['plateloader.js', minifyJavaScript],
-  ['state.js', minifyJavaScript],
-  ['algo.js', minifyJavaScript],
-  ['algo-worker.js', minifyJavaScript],
-  ['sw.js', minifyJavaScript],
-  ['manifest.json', minifyJson],
+  'index.html',
+  'plateloader.css',
+  'plateloader.js',
+  'state.js',
+  'algo.js',
+  'algo-worker.js',
+  'sw.js',
+  'manifest.json',
 ];
 const assetDirectories = ['fonts', 'icons'];
 
@@ -44,137 +48,96 @@ function assertDirectory(directory) {
   inspect(source);
 }
 
-function minifyHtml(source) {
-  return source
-    .replace(/<!--(?!\[if)[\s\S]*?-->/g, '')
-    .replace(/>\s+</g, '><')
-    .replace(/[ \t]+\n/g, '\n')
-    .trim();
+function listFiles(directory, relativeRoot = directory) {
+  const files = [];
+  const visit = (current, relative) => {
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })
+      .sort((left, right) => left.name.localeCompare(right.name))) {
+      const absolute = path.join(current, entry.name);
+      const childRelative = path.join(relative, entry.name);
+      if (entry.isDirectory()) visit(absolute, childRelative);
+      else files.push(childRelative);
+    }
+  };
+  visit(path.join(root, directory), relativeRoot);
+  return files;
 }
 
-function minifyCss(source) {
-  let outputText = '';
-  let quote = null;
-  let escaped = false;
-  let comment = false;
-  let pendingSpace = false;
-  const punctuation = new Set(['{', '}', ':', ';', ',', '>', '+', '~', '(', ')']);
+function buildId() {
+  const packageJson = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
+  const hash = crypto.createHash('sha256');
+  const files = [
+    ...textAssets,
+    ...assetDirectories.flatMap((directory) => listFiles(directory)),
+  ].sort();
 
-  for (let index = 0; index < source.length; index++) {
-    const character = source[index];
-    const next = source[index + 1];
-
-    if (comment) {
-      if (character === '*' && next === '/') {
-        comment = false;
-        index++;
-      }
-      continue;
-    }
-
-    if (quote) {
-      outputText += character;
-      if (escaped) escaped = false;
-      else if (character === '\\') escaped = true;
-      else if (character === quote) quote = null;
-      continue;
-    }
-
-    if (character === '/' && next === '*') {
-      comment = true;
-      index++;
-      continue;
-    }
-
-    if (character === '"' || character === "'") {
-      if (pendingSpace) {
-        const previous = outputText.at(-1);
-        if (previous && !punctuation.has(previous)) outputText += ' ';
-        pendingSpace = false;
-      }
-      quote = character;
-      outputText += character;
-      continue;
-    }
-
-    if (/\s/.test(character)) {
-      pendingSpace = true;
-      continue;
-    }
-
-    if (pendingSpace) {
-      const previous = outputText.at(-1);
-      if (previous && !punctuation.has(previous) && !punctuation.has(character)) outputText += ' ';
-      pendingSpace = false;
-    }
-
-    if (punctuation.has(character) && outputText.endsWith(' ')) outputText = outputText.slice(0, -1);
-    outputText += character;
+  for (const file of files) {
+    hash.update(file);
+    hash.update('\0');
+    hash.update(fs.readFileSync(path.join(root, file)));
+    hash.update('\0');
   }
-
-  if (comment || quote) throw new Error('Unterminated CSS comment or string.');
-  return outputText.replace(/;}/g, '}').trim();
+  return `v${packageJson.version}-${hash.digest('hex').slice(0, 12)}`;
 }
 
-function minifyJavaScript(source) {
-  const outputLines = [];
-  let inTemplate = false;
-
-  for (const originalLine of source.replace(/\r\n?/g, '\n').split('\n')) {
-    const trimmed = originalLine.trim();
-    if (!inTemplate && (trimmed === '' || trimmed.startsWith('//'))) continue;
-
-    const line = inTemplate ? originalLine.replace(/[ \t]+$/g, '') : trimmed;
-    outputLines.push(line);
-
-    let escaped = false;
-    for (let index = 0; index < originalLine.length; index++) {
-      const character = originalLine[index];
-      if (escaped) {
-        escaped = false;
-        continue;
-      }
-      if (character === '\\') {
-        escaped = true;
-        continue;
-      }
-      if (character === '`') inTemplate = !inTemplate;
-    }
+function cleanStaleBuildDirectories() {
+  for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+    if (!/^_site\.(?:tmp|old)-/.test(entry.name)) continue;
+    fs.rmSync(path.join(root, entry.name), { recursive: true, force: true });
   }
-
-  if (inTemplate) throw new Error('Unterminated JavaScript template literal.');
-  return outputLines.join('\n').trim();
 }
 
-function minifyJson(source) {
-  return JSON.stringify(JSON.parse(source));
-}
-
-function build() {
-  for (const [file] of textAssets) assertRegularFile(file);
+function writeSite() {
+  for (const file of textAssets) assertRegularFile(file);
   for (const directory of assetDirectories) assertDirectory(directory);
 
   if (fs.existsSync(output) && fs.lstatSync(output).isSymbolicLink()) {
     throw new Error(`Refusing symlinked build output: ${output}`);
   }
-  if (fs.existsSync(temporaryOutput)) fs.rmSync(temporaryOutput, { recursive: true, force: true });
+
+  cleanStaleBuildDirectories();
   fs.mkdirSync(temporaryOutput, { recursive: true });
+  const id = buildId();
 
   try {
-    for (const [file, transform] of textAssets) {
+    for (const file of textAssets) {
       const source = fs.readFileSync(path.join(root, file), 'utf8');
-      fs.writeFileSync(path.join(temporaryOutput, file), transform(source));
+      let outputText = source;
+      if (file === 'sw.js') {
+        const occurrences = source.split(BUILD_PLACEHOLDER).length - 1;
+        if (occurrences !== 1) {
+          throw new Error(`Expected one ${BUILD_PLACEHOLDER} marker in sw.js; found ${occurrences}.`);
+        }
+        outputText = source.replace(BUILD_PLACEHOLDER, id);
+      }
+      fs.writeFileSync(path.join(temporaryOutput, file), outputText);
     }
+
     for (const directory of assetDirectories) {
       fs.cpSync(path.join(root, directory), path.join(temporaryOutput, directory), { recursive: true });
     }
 
-    fs.rmSync(output, { recursive: true, force: true });
-    fs.renameSync(temporaryOutput, output);
+    let backedUp = false;
+    if (fs.existsSync(output)) {
+      fs.renameSync(output, backupOutput);
+      backedUp = true;
+    }
+
+    try {
+      fs.renameSync(temporaryOutput, output);
+    } catch (error) {
+      if (backedUp && !fs.existsSync(output)) fs.renameSync(backupOutput, output);
+      throw error;
+    }
+
+    if (backedUp) fs.rmSync(backupOutput, { recursive: true, force: true });
   } catch (error) {
     fs.rmSync(temporaryOutput, { recursive: true, force: true });
+    if (fs.existsSync(backupOutput) && !fs.existsSync(output)) {
+      fs.renameSync(backupOutput, output);
+    }
     throw error;
   }
 }
 
-build();
+writeSite();

@@ -6,12 +6,35 @@ function buildStateLib() {
   const DECIMAL = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/;
   const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
 
+  function gcd(a, b) {
+    a = Math.abs(Math.trunc(a));
+    b = Math.abs(Math.trunc(b));
+    while (b) [a, b] = [b, a % b];
+    return a;
+  }
 
   function clampInteger(value, min, max, fallback) {
     const parsed = Number(value);
     const fallbackNumber = Number.isFinite(Number(fallback)) ? Number(fallback) : min;
     const finite = Number.isFinite(parsed) ? parsed : fallbackNumber;
     return Math.max(min, Math.min(max, Math.trunc(finite)));
+  }
+
+  function plateKg(plate) {
+    return Number(typeof plate === 'number' ? plate : plate && plate.kg);
+  }
+
+  // The optimiser represents weights in quarter-kilogram units. Derive the
+  // actual total-weight lattice from the available denominations rather than
+  // assuming theoretical 0.25 kg plates exist.
+  function totalIncrement(plates, sided = 2) {
+    const sideCount = sided === 1 ? 1 : 2;
+    const units = (Array.isArray(plates) ? plates : [])
+      .map((plate) => Math.round(plateKg(plate) * 4))
+      .filter((unit) => Number.isInteger(unit) && unit > 0);
+    if (units.length === 0) return sideCount * 1.25;
+    const unitGcd = units.reduce((result, unit) => gcd(result, unit));
+    return Number(((unitGcd * sideCount) / 4).toFixed(6));
   }
 
   function describeBar(stack, plates, bar, oneSided) {
@@ -27,7 +50,7 @@ function buildStateLib() {
   function generateWarmup(targetKg, options = {}) {
     const bar = Number.isFinite(options.bar) && options.bar >= 0 ? options.bar : 20;
     const sided = options.sided === 1 ? 1 : 2;
-    const increment = sided * 1.25;
+    const increment = totalIncrement(options.plates, sided);
     const minimum = bar > 0 ? bar : increment;
     const percentages = Array.isArray(options.percentages)
       ? options.percentages
@@ -37,7 +60,7 @@ function buildStateLib() {
 
     for (const percentage of percentages) {
       let weight = Math.round((targetKg * percentage) / increment) * increment;
-      weight = Number(weight.toFixed(2));
+      weight = Number(weight.toFixed(6));
       if (weight < minimum) weight = minimum;
       if (!seen.has(weight)) {
         seen.add(weight);
@@ -139,7 +162,15 @@ function buildStateLib() {
     return state;
   }
 
-  return { clampInteger, describeBar, generateWarmup, parseWeightInput, parseHash, stateFromHash };
+  return {
+    clampInteger,
+    describeBar,
+    generateWarmup,
+    parseWeightInput,
+    parseHash,
+    stateFromHash,
+    totalIncrement,
+  };
 }
 
 if (typeof module !== 'undefined' && module.exports) {

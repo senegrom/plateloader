@@ -6,16 +6,16 @@
 <title>Plate Loader — Deadlift sets · Carl Georg Heise</title>
 <meta name="description" content="Plate Loader: enter a sequence of deadlift sets and get the optimal plate arrangement that minimises plate moves between sets. Configurable bar weight, plate stock, and warmup generator."/>
 <meta name="theme-color" content="#0e0f12"/>
-<link rel="canonical" href="https://carlgeorgheise.com/app/plateloader"/>
+<link rel="canonical" href="https://senegrom.github.io/plateloader/"/>
 <meta property="og:title" content="Plate Loader — Deadlift sets"/>
 <meta property="og:description" content="Enter a sequence of deadlift sets, get the optimal plate arrangement that minimises plate moves between sets."/>
 <meta property="og:type" content="website"/>
-<meta property="og:url" content="https://carlgeorgheise.com/app/plateloader"/>
-<meta property="og:image" content="https://carlgeorgheise.com/og-card.png"/>
+<meta property="og:url" content="https://senegrom.github.io/plateloader/"/>
+<meta property="og:image" content="https://senegrom.github.io/plateloader/icons/plateloader-512.png"/>
 <meta name="twitter:card" content="summary_large_image"/>
 <meta name="twitter:title" content="Plate Loader — Deadlift sets"/>
 <meta name="twitter:description" content="Enter a sequence of deadlift sets, get the optimal plate arrangement that minimises plate moves between sets."/>
-<meta name="twitter:image" content="https://carlgeorgheise.com/og-card.png"/>
+<meta name="twitter:image" content="https://senegrom.github.io/plateloader/icons/plateloader-512.png"/>
 <link rel="icon" type="image/png" sizes="192x192" href="icons/plateloader-192.png"/>
 <link rel="icon" type="image/png" sizes="512x512" href="icons/plateloader-512.png"/>
 <link rel="apple-touch-icon" href="icons/plateloader-180.png"/>
@@ -59,8 +59,7 @@
         <summary>
           <span class="disclosure-icon" aria-hidden="true"></span>
           <span class="start-summary-label">Bar starts at</span>
-          <span id="startTotal" class="start-total" aria-live="polite">empty</span>
-          <button type="button" class="start-clear-btn" id="startClear" aria-label="Clear starting stack" disabled>clear</button>
+          <span id="startTotal" class="start-total" aria-live="polite">20 kg bar only</span>
         </summary>
         <div class="start-builder" aria-labelledby="lbl-start" aria-describedby="hint-start">
           <h2 id="lbl-start" class="visually-hidden">Bar starts at</h2>
@@ -68,6 +67,7 @@
           <div class="start-buttons" id="startButtons" role="group" aria-label="Starting plate choices"></div>
           <div class="start-actions">
             <button type="button" class="start-clear-btn start-remove-btn" id="startRemove" disabled>Remove outermost</button>
+            <button type="button" class="start-clear-btn" id="startClear" disabled>Clear starting stack</button>
           </div>
           <div class="hint" id="hint-start">Click or press Enter to add · use Remove outermost on touch · Shift-click, Delete, or right-click removes that type · order matters.</div>
         </div>
@@ -95,7 +95,7 @@
       </button>
       <button type="button" class="mode-btn" data-mode="sqrt" role="radio" aria-checked="false">
         <span class="label">Min Σ√kg moved</span>
-        <span class="desc">Sublinear: prefers many small over one big.</span>
+        <span class="desc">Sublinear: discounts heavier plates relative to total-kg mode, usually favouring fewer larger plates.</span>
       </button>
     </div>
 
@@ -121,14 +121,14 @@
   <div id="outputStatus" class="visually-hidden" role="status" aria-live="polite" aria-atomic="true"></div>
   <div class="sets" id="output"></div>
 
-  <footer>Globally optimised across the whole sequence.</footer>
+  <footer>Valid sets are globally optimised across the whole sequence; invalid entries are skipped.</footer>
 </div>
 
 <dialog id="warmupDialog" class="warmup" aria-labelledby="lbl-warmup">
   <form method="dialog" id="warmupForm">
     <h2 id="lbl-warmup">Generate warmup</h2>
     <label for="warmupTarget" class="warmup-label">Target weight (kg)</label>
-    <input type="number" id="warmupTarget" min="1" max="1000" step="any" value="140" required inputmode="decimal" aria-describedby="warmupNote" />
+    <input type="number" id="warmupTarget" min="20" max="1000" step="any" value="140" required inputmode="decimal" aria-describedby="warmupNote" />
     <div class="warmup-note" id="warmupNote">Will create sets at 50%, 70%, 85%, 95% and 100% (rounded to 2.5 kg).</div>
     <div class="actions">
       <button type="button" class="btn secondary" id="warmupCancel">Cancel</button>

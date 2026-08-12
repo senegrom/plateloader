@@ -1,13 +1,25 @@
 // Plate Loader service worker — offline app-shell cache.
 // Known shell assets use stale-while-revalidate; unrelated requests pass through.
 
-const CACHE_PREFIX = 'plateloader-';
-const CACHE_VERSION = `${CACHE_PREFIX}v13`;
+const BUILD_ID = '__PLATELOADER_BUILD_ID__';
 const APP_SCOPE = self.registration.scope;
 const appUrl = (path) => new URL(path, APP_SCOPE).href;
 const INDEX_URL = appUrl('index.html');
 const SCOPE_PATH = new URL(APP_SCOPE).pathname;
 const INDEX_PATH = new URL(INDEX_URL).pathname;
+
+function shortHash(value) {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index++) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
+}
+
+const CACHE_PREFIX = `plateloader-${shortHash(APP_SCOPE)}-`;
+const CACHE_VERSION = `${CACHE_PREFIX}${BUILD_ID}`;
+const LEGACY_CACHE = /^plateloader-v\d+$/;
 const APP_SHELL = [
   'index.html',
   'plateloader.css',
@@ -44,12 +56,13 @@ function cacheKeyFor(request) {
 }
 
 self.addEventListener('install', (event) => {
-  // Stay in the waiting state until the page's Reload action explicitly asks
-  // this worker to activate. That prevents an old page from being controlled
-  // by a new asset protocol before it reloads.
+  // Stay waiting until the page's Reload action explicitly asks this worker
+  // to activate. A fresh cache is populated without consulting HTTP cache.
   event.waitUntil(
     caches.open(CACHE_VERSION)
-      .then((cache) => cache.addAll(APP_SHELL))
+      .then((cache) => cache.addAll(
+        APP_SHELL.map((url) => new Request(url, { cache: 'reload' })),
+      )),
   );
 });
 
@@ -58,10 +71,13 @@ self.addEventListener('activate', (event) => {
     caches.keys()
       .then((names) => Promise.all(
         names
-          .filter((name) => name.startsWith(CACHE_PREFIX) && name !== CACHE_VERSION)
-          .map((name) => caches.delete(name))
+          .filter((name) => (
+            name !== CACHE_VERSION &&
+            (name.startsWith(CACHE_PREFIX) || LEGACY_CACHE.test(name))
+          ))
+          .map((name) => caches.delete(name)),
       ))
-      .then(() => self.clients.claim())
+      .then(() => self.clients.claim()),
   );
 });
 
@@ -90,7 +106,6 @@ self.addEventListener('fetch', (event) => {
     })
     .catch(() => {});
 
-  // Register lifetime extension synchronously while the event is dispatching.
   event.waitUntil(refreshPromise);
   event.respondWith(
     cachedPromise
@@ -102,6 +117,6 @@ self.addEventListener('fetch', (event) => {
         return cachePromise
           .then((cache) => cache.match(INDEX_URL))
           .then((fallback) => fallback || Response.error());
-      })
+      }),
   );
 });

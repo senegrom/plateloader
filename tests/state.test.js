@@ -16,8 +16,13 @@ const defaults = Object.freeze({
   compact: false,
 });
 const plates = [
-  { label: '25' }, { label: '20' }, { label: '15' }, { label: '10' },
-  { label: '5' }, { label: '2.5' }, { label: '1.25' },
+  { kg: 25, label: '25' },
+  { kg: 20, label: '20' },
+  { kg: 15, label: '15' },
+  { kg: 10, label: '10' },
+  { kg: 5, label: '5' },
+  { kg: 2.5, label: '2.5' },
+  { kg: 1.25, label: '1.25' },
 ];
 
 test('weight input accepts decimals and every documented separator', () => {
@@ -102,14 +107,27 @@ test('bar descriptions preserve plate order from the collar outward', () => {
   assert.equal(state.describeBar([], plates, 20, false), '20 kg bar only');
 });
 
-test('warm-ups use the achievable increment for the selected sidedness', () => {
-  assert.deepEqual(state.generateWarmup(100, { bar: 20, sided: 2 }), [50, 70, 85, 95, 100]);
-  assert.deepEqual(state.generateWarmup(42, { bar: 20, sided: 1 }), [21.25, 30, 36.25, 40, 42.5]);
+test('the achievable total increment is derived from plate denominations', () => {
+  assert.equal(state.totalIncrement(plates, 2), 2.5);
+  assert.equal(state.totalIncrement(plates, 1), 1.25);
+  assert.equal(state.totalIncrement([{ kg: 5 }, { kg: 2.5 }], 2), 5);
+  assert.equal(state.totalIncrement([{ kg: 5 }, { kg: 2.5 }], 1), 2.5);
+});
+
+test('warm-ups use the derived increment for the selected sidedness', () => {
+  assert.deepEqual(
+    state.generateWarmup(100, { bar: 20, sided: 2, plates }),
+    [50, 70, 85, 95, 100],
+  );
+  assert.deepEqual(
+    state.generateWarmup(42, { bar: 20, sided: 1, plates }),
+    [21.25, 30, 36.25, 40, 42.5],
+  );
 });
 
 test('zero-bar warm-ups never generate a zero-weight set', () => {
-  assert.deepEqual(state.generateWarmup(1, { bar: 0, sided: 2 }), [2.5]);
-  assert.deepEqual(state.generateWarmup(1, { bar: 0, sided: 1 }), [1.25]);
+  assert.deepEqual(state.generateWarmup(1, { bar: 0, sided: 2, plates }), [2.5]);
+  assert.deepEqual(state.generateWarmup(1, { bar: 0, sided: 1, plates }), [1.25]);
 });
 
 test('invalid anchors and malformed encoded values are ignored safely', () => {

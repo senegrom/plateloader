@@ -12,6 +12,7 @@ const PLATES = [
   { kg: 2.5,  cls: 'w-2_5',  label: '2.5'  },
   { kg: 1.25, cls: 'w-1_25', label: '1.25' },
 ];
+const PLATE_KG = PLATES.map((plate) => plate.kg);
 const DEFAULT_BAR = 20;
 let BAR = DEFAULT_BAR;
 let plateMax = PLATES.map(() => 2);
@@ -178,7 +179,9 @@ function renderBar(stack, prevStack, options) {
   return `<div class="bar-wrap">${renderBarRow(stack, prevStack, options)}</div>`;
 }
 
-function plateChips(counts) {
+function plateChips(stack) {
+  const counts = new Array(PLATES.length).fill(0);
+  for (const plateIndex of stack) counts[plateIndex]++;
   const parts = [];
   for (let i = 0; i < counts.length; i++) {
     if (counts[i] > 0) {
@@ -191,6 +194,8 @@ function plateChips(counts) {
 }
 
 const deltaClass = (n) => n === 0 ? 'zero' : n <= 4 ? 'few' : 'many';
+const moveLabel = (n) => `${n} move${n === 1 ? '' : 's'}`;
+const plateLabel = (n) => `${n} plate${n === 1 ? '' : 's'}`;
 
 // toFixed(2) ensures a decimal, then strip trailing zeros AND the dangling
 // decimal point. A one-liner regex would eat legit trailing zeros from
@@ -201,13 +206,13 @@ function changeText(r, mode) {
   const kgDetail = (mode === 'kg' || mode === 'sqrt')
     ? ` <span class="kg-detail">${fmtKg(r.bothSidesKg)} kg</span>` : '';
   if (r.isStart) {
-    return `<span class="delta ${deltaClass(r.bothSidesMoves)}">load ${r.bothSidesMoves} plate${r.bothSidesMoves !== 1 ? 's' : ''}</span>${kgDetail}`;
+    return `<span class="delta ${deltaClass(r.bothSidesMoves)}">load ${plateLabel(r.bothSidesMoves)}</span>${kgDetail}`;
   }
   if (r.bothSidesMoves === 0) return `<span class="delta zero">no change</span>`;
   const bits = [];
-  if (r.removedIdx.length) bits.push(`−${r.removedIdx.length}`);
-  if (r.addedIdx.length)   bits.push(`+${r.addedIdx.length}`);
-  return `<span class="delta ${deltaClass(r.bothSidesMoves)}">${bits.join(' ')}${oneSided ? '' : '/side'} · ${r.bothSidesMoves} moves</span>${kgDetail}`;
+  if (r.removedCount) bits.push(`−${r.removedCount}`);
+  if (r.addedCount) bits.push(`+${r.addedCount}`);
+  return `<span class="delta ${deltaClass(r.bothSidesMoves)}">${bits.join(' ')}${oneSided ? '' : '/side'} · ${moveLabel(r.bothSidesMoves)}</span>${kgDetail}`;
 }
 
 function renderResults(results, hasStart) {
@@ -218,6 +223,7 @@ function renderResults(results, hasStart) {
   let totalMoves = 0, totalKg = 0, totalSqrt = 0, validSets = 0;
   const userSetCount = Math.max(0, results.length - (hasStart ? 1 : 0));
   let prevStack = [];
+  let pendingCleanup = null;
   let setNum = 0;  // 1-based count of "real" sets (excludes the starting state)
 
   results.forEach((r, idx) => {
@@ -232,9 +238,8 @@ function renderResults(results, hasStart) {
           <div class="set-total">${r.total}<span class="unit">kg</span></div>
           <div class="set-changes"><span class="delta many">invalid</span></div>
         </div>
-        <div class="invalid-msg">${esc(r.reason)}</div>`;
+        <div class="invalid-msg">${esc(r.reason)}<span class="skip-note">Skipped; surrounding valid sets remain globally optimised together.</span></div>`;
       out.appendChild(card);
-      prevStack = [];
       return;
     }
 
@@ -260,30 +265,35 @@ function renderResults(results, hasStart) {
         <div class="set-changes">${changes}</div>
       </div>
       ${renderBar(r.stack, isStartingState ? [] : (r.isStart ? [] : prevStack), { animateChanges: !isStartingState })}
-      <div class="plate-list">${plateChips(r.counts)}${oneSided ? '' : ' <span class="scope-note">· per side</span>'}</div>`;
+      <div class="plate-list">${plateChips(r.stack)}${oneSided ? '' : ' <span class="scope-note">· per side</span>'}</div>`;
     out.appendChild(card);
     prevStack = r.stack;
 
-    // Cleanup row at end of run (skip if nothing to unload).
     if (r.cleanup && r.cleanup.bothSidesMoves > 0) {
-      totalMoves += r.cleanup.bothSidesMoves;
-      totalKg    += r.cleanup.bothSidesKg;
-      totalSqrt  += r.cleanup.bothSidesSqrtKg;
-      const cleanup = document.createElement('div');
-      cleanup.className = 'set cleanup';
-      const kgDetail = (CURRENT_MODE === 'kg' || CURRENT_MODE === 'sqrt')
-        ? ` <span class="kg-detail">${fmtKg(r.cleanup.bothSidesKg)} kg</span>` : '';
-      cleanup.innerHTML = `
-        <div class="set-head">
-          <div class="set-num">UNLOAD</div>
-          <div class="set-total">→ bar only</div>
-          <div class="set-changes"><span class="delta ${deltaClass(r.cleanup.bothSidesMoves)}">−${r.cleanup.removedIdx.length}${oneSided ? '' : '/side'} · ${r.cleanup.bothSidesMoves} moves</span>${kgDetail}</div>
-        </div>
-        ${renderBar([], r.stack)}`;
-      out.appendChild(cleanup);
-      prevStack = [];
+      pendingCleanup = { cleanup: r.cleanup, stack: r.stack };
     }
   });
+
+  // Invalid rows are annotations rather than physical bar states. Render the
+  // one final unload after every user row, including trailing invalid entries.
+  if (pendingCleanup) {
+    const { cleanup: cleanupData, stack } = pendingCleanup;
+    totalMoves += cleanupData.bothSidesMoves;
+    totalKg += cleanupData.bothSidesKg;
+    totalSqrt += cleanupData.bothSidesSqrtKg;
+    const cleanup = document.createElement('div');
+    cleanup.className = 'set cleanup';
+    const kgDetail = (CURRENT_MODE === 'kg' || CURRENT_MODE === 'sqrt')
+      ? ` <span class="kg-detail">${fmtKg(cleanupData.bothSidesKg)} kg</span>` : '';
+    cleanup.innerHTML = `
+      <div class="set-head">
+        <div class="set-num">UNLOAD</div>
+        <div class="set-total">→ bar only</div>
+        <div class="set-changes"><span class="delta ${deltaClass(cleanupData.bothSidesMoves)}">−${cleanupData.removedCount}${oneSided ? '' : '/side'} · ${moveLabel(cleanupData.bothSidesMoves)}</span>${kgDetail}</div>
+      </div>
+      ${renderBar([], stack)}`;
+    out.appendChild(cleanup);
+  }
 
   if (validSets > 0) {
     summaryPanel.hidden = false;
@@ -385,7 +395,7 @@ function startStackTotalKg() {
 
 function updateStartTotalDisplay() {
   if (!startStack || startStack.length === 0) {
-    startTotalEl.textContent = 'empty';
+    startTotalEl.textContent = `${fmtKg(BAR)} kg bar only`;
   } else {
     startTotalEl.textContent = `${fmtKg(startStackTotalKg())} kg`;
   }
@@ -436,7 +446,7 @@ function setOneSided(on) {
   if (stockLbl) stockLbl.textContent = oneSided ? 'max of each' : 'max per side';
   const loadLbl = $('loadScopeLabel');
   if (loadLbl) loadLbl.textContent = oneSided ? 'on one side only' : 'symmetrically';
-  updateWarmupNote();
+  updateWarmupConstraints();
   updateStartTotalDisplay();
   renderStartViz();
 }
@@ -512,6 +522,7 @@ function setBar(kg) {
   if (subEl) subEl.textContent = `Deadlift · ${kg} kg bar`;
   if (startTotalEl) updateStartTotalDisplay();  // start total includes BAR
   if (startVizEl) renderStartViz();              // accessible description includes BAR
+  updateWarmupConstraints();
 }
 
 function setMode(m) {
@@ -594,7 +605,7 @@ function compute(forceSync) {
   if (worker) {
     inflightReqs.add(reqId);
     indicatorTimers.set(reqId, setTimeout(showIndicator, INDICATOR_DELAY_MS));
-    worker.postMessage({ reqId, weights, mode: CURRENT_MODE, plateMax: plateMax.slice(), PLATES, BAR, startStack, hasStart, monotonic, sided: sided() });
+    worker.postMessage({ reqId, weights, mode: CURRENT_MODE, plateMax: plateMax.slice(), plateKg: PLATE_KG, BAR, startStack, hasStart, monotonic, sided: sided() });
     return;
   }
 
@@ -606,7 +617,7 @@ function compute(forceSync) {
     showIndicator();
     requestAnimationFrame(() => {
       if (currentReqId !== reqId) return;
-      renderResults(algoLib.optimize(weights, CURRENT_MODE, plateMax, PLATES, BAR, startStack, monotonic, sided()), hasStart);
+      renderResults(algoLib.optimize(weights, CURRENT_MODE, plateMax, PLATE_KG, BAR, startStack, monotonic, sided()), hasStart);
     });
   });
 }
@@ -619,18 +630,28 @@ document.addEventListener('visibilitychange', () => {
 });
 
 // ---------- warmup generator ----------
-// 50/70/85/95/100%, rounded to the smallest achievable total increment.
-const warmupIncrement = () => sided() * 1.25;
+// 50/70/85/95/100%, rounded to the actual denomination lattice.
+const warmupIncrement = () => stateLib.totalIncrement(PLATES, sided());
+const warmupMinimum = () => BAR > 0 ? BAR : warmupIncrement();
 
-function updateWarmupNote() {
+function updateWarmupConstraints() {
   const note = $('warmupNote');
-  if (!note) return;
-  note.textContent = `Will create sets at 50%, 70%, 85%, 95% and 100% (rounded to ${fmtKg(warmupIncrement())} kg).`;
+  const target = $('warmupTarget');
+  const minimum = warmupMinimum();
+  if (target) {
+    target.min = fmtKg(minimum);
+    target.max = String(MAX_TOTAL_KG);
+    target.setCustomValidity('');
+  }
+  if (note) {
+    note.textContent = `Will create sets at 50%, 70%, 85%, 95% and 100% (rounded to ${fmtKg(warmupIncrement())} kg; minimum ${fmtKg(minimum)} kg).`;
+  }
 }
 
 const generateWarmup = (targetKg) => stateLib.generateWarmup(targetKg, {
   bar: BAR,
   sided: sided(),
+  plates: PLATES,
 });
 
 // ---------- state persistence (localStorage + URL hash) ----------
@@ -734,8 +755,7 @@ startButtonsEl.addEventListener('click', onStartButtonClick);
 startButtonsEl.addEventListener('contextmenu', onStartButtonContextMenu);
 startButtonsEl.addEventListener('keydown', onStartButtonKeyDown);
 startRemoveBtn.addEventListener('click', () => removeStartPlate());
-startClearBtn.addEventListener('click', (e) => {
-  e.preventDefault(); e.stopPropagation();
+startClearBtn.addEventListener('click', () => {
   setStartStack(null);
   persistAndRecompute();
 });
@@ -798,17 +818,30 @@ function closeWarmupDialog() {
 
 $('warmup').addEventListener('click', () => {
   if (inputEl.value.trim() && !confirm('Replace current sets with a generated warmup?')) return;
-  warmupTarget.value = '140';
+  updateWarmupConstraints();
+  const minimum = warmupMinimum();
+  warmupTarget.value = fmtKg(Math.max(minimum, 140));
   if (typeof warmupDialog.showModal === 'function') warmupDialog.showModal();
   else warmupDialog.setAttribute('open', '');
   requestAnimationFrame(() => { warmupTarget.focus(); warmupTarget.select(); });
 });
 
+warmupTarget.addEventListener('input', () => warmupTarget.setCustomValidity(''));
+
 warmupForm.addEventListener('submit', (e) => {
   e.preventDefault();
   const kg = Number(warmupTarget.value);
+  const minimum = warmupMinimum();
+  warmupTarget.setCustomValidity('');
+  if (!Number.isFinite(kg) || kg < minimum || kg > MAX_TOTAL_KG) {
+    warmupTarget.setCustomValidity(
+      `Enter a target between ${fmtKg(minimum)} and ${MAX_TOTAL_KG} kg for the selected bar.`,
+    );
+    warmupTarget.reportValidity();
+    return;
+  }
+
   closeWarmupDialog();
-  if (!Number.isFinite(kg) || kg <= 0 || kg > MAX_TOTAL_KG) return;
   inputEl.value = generateWarmup(kg).join('\n');
   updateComputeBtn();
   persist();

@@ -35,7 +35,7 @@ function transitionPair(previous, next, mode, sided) {
   ) shared++;
 
   const moved = previous.slice(shared).concat(next.slice(shared));
-  let count = moved.length * sided;
+  const count = moved.length * sided;
   let kg = 0;
   let sqrtKg = 0;
   for (const plateIdx of moved) {
@@ -108,7 +108,12 @@ function orderedStacks(counts, monotonic) {
 function candidatesForWeight(total, plateMax, monotonic, sided) {
   const perSide = (total - BAR) / sided;
   const targetUnits = Math.round(perSide * 4);
-  if (total < BAR || perSide < 0 || Math.abs(targetUnits - perSide * 4) > EPSILON) return [];
+  if (
+    !Number.isFinite(total) ||
+    total < BAR ||
+    perSide < 0 ||
+    Math.abs(targetUnits - perSide * 4) > EPSILON
+  ) return [];
 
   const unique = new Map();
   for (const counts of countCombinations(targetUnits, plateMax)) {
@@ -117,9 +122,11 @@ function candidatesForWeight(total, plateMax, monotonic, sided) {
   return [...unique.values()];
 }
 
+// Invalid entries are annotations rather than bar states. The oracle therefore
+// removes impossible entries and optimises every remaining valid set together.
 function oracleObjective(weights, mode, plateMax, startStack, monotonic, sided) {
   const effectiveMax = plateMax.slice();
-  const sets = [];
+  const candidateSets = [];
 
   if (startStack && startStack.length) {
     const pinned = monotonic ? startStack.slice().sort((a, b) => a - b) : startStack.slice();
@@ -128,48 +135,36 @@ function oracleObjective(weights, mode, plateMax, startStack, monotonic, sided) 
     for (let plateIdx = 0; plateIdx < effectiveMax.length; plateIdx++) {
       effectiveMax[plateIdx] = Math.max(effectiveMax[plateIdx], startCounts[plateIdx]);
     }
-    sets.push([pinned]);
+    candidateSets.push([pinned]);
   }
 
   for (const weight of weights) {
-    sets.push(candidatesForWeight(weight, effectiveMax, monotonic, sided));
+    const candidates = candidatesForWeight(weight, effectiveMax, monotonic, sided);
+    if (candidates.length > 0) candidateSets.push(candidates);
   }
 
-  let total = [0, 0];
-  let index = 0;
-  while (index < sets.length) {
-    if (sets[index].length === 0) {
-      index++;
-      continue;
-    }
+  if (candidateSets.length === 0) return [0, 0];
 
-    let end = index;
-    while (end + 1 < sets.length && sets[end + 1].length > 0) end++;
-
-    let states = new Map([['', { stack: [], cost: [0, 0] }]]);
-    for (let setIndex = index; setIndex <= end; setIndex++) {
-      const nextStates = new Map();
-      for (const nextStack of sets[setIndex]) {
-        let best = [Infinity, Infinity];
-        for (const { stack: previousStack, cost } of states.values()) {
-          const candidate = addPair(cost, transitionPair(previousStack, nextStack, mode, sided));
-          if (lexicographicallyBetter(candidate, best)) best = candidate;
-        }
-        nextStates.set(nextStack.join(','), { stack: nextStack, cost: best });
+  let states = new Map([['', { stack: [], cost: [0, 0] }]]);
+  for (const candidates of candidateSets) {
+    const nextStates = new Map();
+    for (const nextStack of candidates) {
+      let best = [Infinity, Infinity];
+      for (const { stack: previousStack, cost } of states.values()) {
+        const candidate = addPair(cost, transitionPair(previousStack, nextStack, mode, sided));
+        if (lexicographicallyBetter(candidate, best)) best = candidate;
       }
-      states = nextStates;
+      nextStates.set(nextStack.join(','), { stack: nextStack, cost: best });
     }
-
-    let bestRun = [Infinity, Infinity];
-    for (const { stack, cost } of states.values()) {
-      const candidate = addPair(cost, transitionPair(stack, [], mode, sided));
-      if (lexicographicallyBetter(candidate, bestRun)) bestRun = candidate;
-    }
-    total = addPair(total, bestRun);
-    index = end + 1;
+    states = nextStates;
   }
 
-  return total;
+  let best = [Infinity, Infinity];
+  for (const { stack, cost } of states.values()) {
+    const candidate = addPair(cost, transitionPair(stack, [], mode, sided));
+    if (lexicographicallyBetter(candidate, best)) best = candidate;
+  }
+  return best;
 }
 
 function resultObjective(results, mode) {
@@ -229,6 +224,8 @@ test('selected two-sided, one-sided, monotonic and pinned-start cases match an e
     { weights: [40, 45, 50], startStack: [3, 4] },
     { weights: [40, 45, 50], startStack: [4, 3] },
     { weights: [35, 45], startStack: [4, 3], monotonic: true },
+    { weights: [60, 61, 80], stock: 2 },
+    { weights: [61, 60, 80, 61], stock: 2 },
   ];
   for (const testCase of cases) checkAgainstOracle(testCase);
 });
@@ -239,14 +236,14 @@ test('deterministic random small-domain cases match the exhaustive oracle', () =
     seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
     return seed / 0x100000000;
   };
-  const twoSidedWeights = [20, 22.5, 25, 27.5, 30, 32.5, 35, 37.5, 40, 42.5, 45, 47.5, 50];
-  const oneSidedWeights = [20, 21.25, 22.5, 25, 27.5, 30, 35, 40, 45, 50];
+  const twoSidedWeights = [20, 22.5, 25, 27.5, 30, 32.5, 35, 37.5, 40, 42.5, 45, 47.5, 50, 20.5];
+  const oneSidedWeights = [20, 21.25, 22.5, 25, 27.5, 30, 35, 40, 45, 50, 20.5];
   const startStacks = [null, [1], [3, 4], [4, 3], [5, 6]];
 
-  for (let caseIndex = 0; caseIndex < 40; caseIndex++) {
+  for (let caseIndex = 0; caseIndex < 80; caseIndex++) {
     const sided = random() < 0.35 ? 1 : 2;
     const source = sided === 1 ? oneSidedWeights : twoSidedWeights;
-    const length = 1 + Math.floor(random() * 4);
+    const length = 1 + Math.floor(random() * 5);
     const weights = Array.from({ length }, () => source[Math.floor(random() * source.length)]);
     checkAgainstOracle({
       weights,
@@ -258,19 +255,44 @@ test('deterministic random small-domain cases match the exhaustive oracle', () =
   }
 });
 
-test('invalid weights report stable reasons and split optimisation runs', () => {
-  const plateMax = PLATES.map(() => 1);
-  const results = algo.optimize([15, 20.25, 500, 30], 'count', plateMax, PLATES, BAR, null, false, 2);
+test('invalid entries stay visible but do not force an unload boundary', () => {
+  const plateMax = PLATES.map(() => 2);
+  const bridged = algo.optimize([60, 61, 80], 'count', plateMax, PLATES, BAR, null, false, 2);
+  const filtered = algo.optimize([60, 80], 'count', plateMax, PLATES, BAR, null, false, 2);
 
-  assert.equal(results[0].valid, false);
-  assert.match(results[0].reason, /Below bar weight/);
-  assert.equal(results[1].valid, false);
-  assert.match(results[1].reason, /Not achievable/);
-  assert.equal(results[2].valid, false);
-  assert.match(results[2].reason, /No plate combination/);
-  assert.equal(results[3].valid, true);
-  assert.equal(results[3].isStart, true);
-  assert.ok(results[3].cleanup);
+  assert.equal(bridged[1].valid, false);
+  assert.equal(bridged[1].skipped, true);
+  assert.match(bridged[1].reason, /available plate denominations/);
+  assert.deepEqual(resultObjective(bridged, 'count'), resultObjective(filtered, 'count'));
+  assert.deepEqual(resultObjective(bridged, 'count'), [8, 120]);
+  assert.equal(bridged[0].cleanup, undefined);
+  assert.equal(bridged[2].isStart, false);
+  assert.ok(bridged[2].cleanup);
+});
+
+test('denomination failures are distinct from selected-stock failures', () => {
+  const plateMax = PLATES.map(() => 1);
+  const twoSided = algo.optimize([15, 20.5, 22.5, 500], 'count', plateMax, PLATES, BAR, null, false, 2);
+
+  assert.match(twoSided[0].reason, /Below bar weight/);
+  assert.match(twoSided[1].reason, /2\.5 kg total increments/);
+  assert.equal(twoSided[2].valid, true);
+  assert.match(twoSided[3].reason, /current stock/);
+
+  const oneSided = algo.optimize([20.5, 21.25], 'count', plateMax, PLATES, BAR, null, false, 1);
+  assert.match(oneSided[0].reason, /1\.25 kg total increments/);
+  assert.equal(oneSided[1].valid, true);
+});
+
+test('the square-root objective favours fewer larger plates as documented', () => {
+  const plateMax = PLATES.map(() => 2);
+  const kg = algo.optimize([22.5, 30], 'kg', plateMax, PLATES, BAR, null, false, 2);
+  const sqrt = algo.optimize([22.5, 30], 'sqrt', plateMax, PLATES, BAR, null, false, 2);
+
+  assert.deepEqual(kg[1].stack, [6, 5, 6]);
+  assert.deepEqual(sqrt[1].stack, [4]);
+  assert.ok(resultObjective(kg, 'kg')[0] < resultObjective(sqrt, 'kg')[0]);
+  assert.ok(resultObjective(sqrt, 'sqrt')[0] < resultObjective(kg, 'sqrt')[0]);
 });
 
 test('a pinned starting stack remains ordered and can exceed the selected stock cap', () => {
@@ -282,4 +304,17 @@ test('a pinned starting stack remains ordered and can exceed the selected stock 
   assert.equal(results[0].valid, true);
   assert.equal(results[1].valid, true);
   assert.deepEqual(results[1].stack, [1]);
+});
+
+test('worker-facing result objects omit derivable and unused payload fields', () => {
+  const results = algo.optimize([60, 80], 'count', PLATES.map(() => 2), PLATES, BAR, null, false, 2);
+  for (const result of results.filter((entry) => entry.valid)) {
+    for (const unused of ['counts', 'removedIdx', 'addedIdx', 'perSide', 'perSideMoves', 'isEnd']) {
+      assert.equal(unused in result, false, unused);
+    }
+    assert.equal(Number.isInteger(result.removedCount), true);
+    assert.equal(Number.isInteger(result.addedCount), true);
+  }
+  assert.equal('removedIdx' in results.at(-1).cleanup, false);
+  assert.equal(Number.isInteger(results.at(-1).cleanup.removedCount), true);
 });

@@ -6,7 +6,6 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
-const zlib = require('node:zlib');
 
 const root = path.resolve(__dirname, '..');
 const read = (file) => fs.readFileSync(path.join(root, file), 'utf8');
@@ -15,11 +14,16 @@ const runBuild = (...args) => spawnSync(process.execPath, ['scripts/build-site.j
   cwd: root,
   encoding: 'utf8',
 });
+const textAssets = [
+  'index.html', 'plateloader.css', 'plateloader.js', 'state.js',
+  'algo.js', 'algo-worker.js', 'sw.js', 'manifest.json',
+];
 
 function fileTreeHashes(directory) {
   const output = new Map();
   const visit = (current, relativeRoot = '') => {
-    for (const entry of fs.readdirSync(current, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })
+      .sort((left, right) => left.name.localeCompare(right.name))) {
       const relative = path.join(relativeRoot, entry.name);
       const absolute = path.join(current, entry.name);
       if (entry.isDirectory()) visit(absolute, relative);
@@ -30,187 +34,136 @@ function fileTreeHashes(directory) {
   return output;
 }
 
-function decodeIndexedPng(file) {
-  const bytes = fs.readFileSync(file);
-  assert.deepEqual([...bytes.subarray(0, 8)], [137, 80, 78, 71, 13, 10, 26, 10]);
-  let offset = 8;
-  let width;
-  let height;
-  let bitDepth;
-  let colorType;
-  let interlace;
-  let palette = Buffer.alloc(0);
-  let transparency = Buffer.alloc(0);
-  const idat = [];
-
-  while (offset < bytes.length) {
-    const length = bytes.readUInt32BE(offset);
-    const type = bytes.toString('ascii', offset + 4, offset + 8);
-    const data = bytes.subarray(offset + 8, offset + 8 + length);
-    offset += 12 + length;
-    if (type === 'IHDR') {
-      width = data.readUInt32BE(0);
-      height = data.readUInt32BE(4);
-      bitDepth = data[8];
-      colorType = data[9];
-      interlace = data[12];
-    } else if (type === 'PLTE') palette = Buffer.from(data);
-    else if (type === 'tRNS') transparency = Buffer.from(data);
-    else if (type === 'IDAT') idat.push(data);
-    else if (type === 'IEND') break;
-  }
-
-  assert.equal(bitDepth, 8, 'test decoder expects 8-bit PNGs');
-  assert.equal(colorType, 3, 'test decoder expects indexed PNGs');
-  assert.equal(interlace, 0, 'test decoder expects non-interlaced PNGs');
-  const filtered = zlib.inflateSync(Buffer.concat(idat));
-  const stride = width;
-  const pixels = Buffer.alloc(width * height);
-  let inputOffset = 0;
-  let previous = Buffer.alloc(stride);
-
-  const paeth = (a, b, c) => {
-    const prediction = a + b - c;
-    const pa = Math.abs(prediction - a);
-    const pb = Math.abs(prediction - b);
-    const pc = Math.abs(prediction - c);
-    return pa <= pb && pa <= pc ? a : pb <= pc ? b : c;
-  };
-
-  for (let y = 0; y < height; y++) {
-    const filter = filtered[inputOffset++];
-    const row = Buffer.from(filtered.subarray(inputOffset, inputOffset + stride));
-    inputOffset += stride;
-    for (let x = 0; x < stride; x++) {
-      const left = x > 0 ? row[x - 1] : 0;
-      const up = previous[x];
-      const upLeft = x > 0 ? previous[x - 1] : 0;
-      if (filter === 1) row[x] = (row[x] + left) & 0xff;
-      else if (filter === 2) row[x] = (row[x] + up) & 0xff;
-      else if (filter === 3) row[x] = (row[x] + Math.floor((left + up) / 2)) & 0xff;
-      else if (filter === 4) row[x] = (row[x] + paeth(left, up, upLeft)) & 0xff;
-      else assert.equal(filter, 0, `unsupported PNG filter ${filter}`);
+function listFiles(directory, relativeRoot = directory) {
+  const files = [];
+  const visit = (current, relative) => {
+    for (const entry of fs.readdirSync(current, { withFileTypes: true })
+      .sort((left, right) => left.name.localeCompare(right.name))) {
+      const absolute = path.join(current, entry.name);
+      const childRelative = path.join(relative, entry.name);
+      if (entry.isDirectory()) visit(absolute, childRelative);
+      else files.push(childRelative);
     }
-    row.copy(pixels, y * stride);
-    previous = row;
-  }
-
-  const rgba = Buffer.alloc(width * height * 4);
-  for (let index = 0; index < pixels.length; index++) {
-    const paletteIndex = pixels[index];
-    rgba[index * 4] = palette[paletteIndex * 3];
-    rgba[index * 4 + 1] = palette[paletteIndex * 3 + 1];
-    rgba[index * 4 + 2] = palette[paletteIndex * 3 + 2];
-    rgba[index * 4 + 3] = paletteIndex < transparency.length ? transparency[paletteIndex] : 255;
-  }
-  return { width, height, rgba };
+  };
+  visit(path.join(root, directory), relativeRoot);
+  return files;
 }
 
-test('the source tree uses index.html directly and exposes concise live status', () => {
+function expectedBuildId() {
+  const version = JSON.parse(read('package.json')).version;
+  const hash = crypto.createHash('sha256');
+  const files = [
+    ...textAssets,
+    ...listFiles('fonts'),
+    ...listFiles('icons'),
+  ].sort();
+  for (const file of files) {
+    hash.update(file);
+    hash.update('\0');
+    hash.update(fs.readFileSync(path.join(root, file)));
+    hash.update('\0');
+  }
+  return `v${version}-${hash.digest('hex').slice(0, 12)}`;
+}
+
+function pngDimensions(file) {
+  const bytes = fs.readFileSync(file);
+  assert.deepEqual([...bytes.subarray(0, 8)], [137, 80, 78, 71, 13, 10, 26, 10]);
+  assert.equal(bytes.toString('ascii', 12, 16), 'IHDR');
+  return [bytes.readUInt32BE(16), bytes.readUInt32BE(20)];
+}
+
+test('HTML copy, optimisation semantics and accessibility match the application behavior', () => {
   const html = read('index.html');
   assert.equal(fs.existsSync(path.join(root, 'plateloader.html')), false);
   assert.doesNotMatch(html, /<style\b|\sstyle=/i);
-  assert.match(html, /<span class="disclosure-icon" aria-hidden="true"><\/span>/);
   assert.match(html, /id="outputStatus"[^>]*role="status"/);
-  assert.match(html, /<div class="sets" id="output"><\/div>/);
-  assert.doesNotMatch(html, /id="output"[^>]*aria-live/);
+  assert.match(html, /Sublinear: discounts heavier plates[^<]*fewer larger plates/);
+  assert.match(html, /Valid sets are globally optimised[^<]*invalid entries are skipped/);
+  assert.match(html, /<link rel="canonical" href="https:\/\/senegrom\.github\.io\/plateloader\/"\/>/);
+  assert.match(html, /<meta property="og:url" content="https:\/\/senegrom\.github\.io\/plateloader\/"\/>/);
+
+  const summary = html.match(/<summary>[\s\S]*?<\/summary>/)?.[0];
+  assert.ok(summary, 'starting-stack summary missing');
+  assert.doesNotMatch(summary, /startClear/);
+  assert.match(html, /id="startClear"[^>]*>Clear starting stack<\/button>/);
+  assert.match(html, /id="startTotal"[^>]*>20 kg bar only<\/span>/);
 });
 
-test('CSS keeps required behavior without a generated disclosure character or size floor', () => {
+test('CSS retains required behavior, safe areas and no unused text-input selectors', () => {
   const css = read('plateloader.css');
   for (const selector of [
     '.disclosure-icon', '#startDetails[open] .disclosure-icon', '.plate.added-right',
     'body.compact .set', '@media print', '@media (prefers-reduced-motion: reduce)',
-    '.update-toast', '.visually-hidden',
+    '.update-toast', '.visually-hidden', '.invalid-msg .skip-note',
   ]) assert.match(css, new RegExp(selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
-  assert.doesNotMatch(css, /#startDetails\s+summary::before/);
+  assert.doesNotMatch(css, /input\[type=text\]/);
+  assert.match(css, /env\(safe-area-inset-top\)/);
+  assert.match(css, /env\(safe-area-inset-bottom\)/);
 });
 
-test('UI source contains every follow-up fix', () => {
+test('UI source covers skipped invalid rows, singular moves and warm-up validation', () => {
   const app = read('plateloader.js');
-  const state = read('state.js');
-  assert.match(state, /state\.input = String\(params\.w\)\.replace\(\/\\r\\n\?\/g, '\\n'\);/);
-  assert.doesNotMatch(state, /replace\(\/,\/g, '\\n'\)/);
-  assert.match(app, /stateLib\.clampInteger\(value, 0, STOCK_MAX, DEFAULT_STOCK\)/);
-  assert.doesNotMatch(app, /\bn\s*\|\s*0\b/);
-  assert.match(app, /startDetails\.open = Boolean\(startStack && startStack\.length\)/);
-  assert.match(app, /stateLib\.generateWarmup/);
-  assert.match(app, /stateLib\.describeBar/);
-  assert.match(app, /warmupDialog\.open \|\| warmupDialog\.hasAttribute\('open'\)/);
-  assert.match(app, /announceStatus\(`Results updated:/);
+  assert.match(app, /surrounding valid sets remain globally optimised together/);
+  assert.match(app, /const moveLabel = \(n\) => `\$\{n\} move/);
+  assert.match(app, /startTotalEl\.textContent = `\$\{fmtKg\(BAR\)\} kg bar only`/);
+  assert.match(app, /stateLib\.totalIncrement\(PLATES, sided\(\)\)/);
+  assert.match(app, /warmupTarget\.reportValidity\(\)/);
+  assert.match(app, /kg < minimum/);
+  assert.match(app, /let pendingCleanup = null/);
+  assert.match(app, /one final unload after every user row/);
+  assert.doesNotMatch(app, /removedIdx|addedIdx|r\.counts/);
 });
 
-test('service worker waits for explicit update activation', () => {
-  const sw = read('sw.js');
-  assert.match(sw, /CACHE_VERSION = `\$\{CACHE_PREFIX\}v13`/);
-  const installBlock = sw.match(/self\.addEventListener\('install',[\s\S]*?\n\}\);/)[0];
-  assert.doesNotMatch(installBlock, /skipWaiting/);
-  assert.match(sw, /event\.data\.type === 'SKIP_WAITING'/);
+test('the optimiser shares feasibility data and uses compact numeric memo state', () => {
+  const algorithm = read('algo.js');
+  assert.match(algorithm, /const feasibilityCache = new Map\(\)/);
+  assert.match(algorithm, /const packMemoKey =/);
+  assert.match(algorithm, /prefixKey \* PREFIX_BASE/);
+  assert.doesNotMatch(algorithm, /memoChoices|const fKey|combos:/);
+  assert.doesNotMatch(algorithm, /\+\s*'\|'/);
+  assert.match(algorithm, /removedCount/);
+  assert.doesNotMatch(algorithm, /removedIdx|addedIdx|perSideMoves:|isEnd/);
 });
 
-test('losslessly recompressed icons retain exact RGBA pixels and dimensions', () => {
-  const expected = {
-    'plateloader-180.png': [180, 180, '4155e7a5bb36573a1ee5a6f514b3e59707fc66e903fb0d6cb835a2c1c383f1d8', 3168],
-    'plateloader-192.png': [192, 192, '5620a7bdc79b2e931a96dfe789e2c456e78a1bb1896c960c2d0060d56b0d15f8', 3341],
-    'plateloader-512-maskable.png': [512, 512, 'ce2bfc8c57d6731e7d5ee4b06b6d627c3025a8c35bfeb8c868be28390107fc3d', 9004],
-    'plateloader-512.png': [512, 512, '14c4ec12dc8c3760f8f1f066b65889db0b4a586bbf7c36236374adbaf541942a', 9008],
-  };
-  for (const [name, [width, height, pixelHash, oldSize]] of Object.entries(expected)) {
-    const file = path.join(root, 'icons', name);
-    const decoded = decodeIndexedPng(file);
-    assert.equal(decoded.width, width);
-    assert.equal(decoded.height, height);
-    assert.equal(sha256(decoded.rgba), pixelHash);
-    assert.ok(fs.statSync(file).size < oldSize, `${name} was not reduced`);
-  }
-});
+test('the builder removes the CodeQL finding and produces deterministic source-faithful output', () => {
+  const builder = read('scripts/build-site.js');
+  assert.doesNotMatch(builder, /minifyHtml|minifyCss|minifyJavaScript/);
+  assert.doesNotMatch(builder, /<!--\(\?!|\[\\s\\S\]\*\?/);
+  assert.match(builder, /BUILD_PLACEHOLDER/);
+  assert.match(builder, /renameSync\(temporaryOutput, output\)/);
 
-test('all deliberately duplicated font files remain byte-for-byte unchanged', () => {
-  const expected = {
-    'BebasNeue-400.woff2': 'a7c90c89240c134f7fdd33d40c000ec90b79d675ea53e8cc5a6d423c073de412',
-    'Inter-400.woff2': '3100e775e8616cd2611beecfa23a4263d7037586789b43f035236a2e6fbd4c62',
-    'Inter-500.woff2': '3100e775e8616cd2611beecfa23a4263d7037586789b43f035236a2e6fbd4c62',
-    'Inter-600.woff2': '3100e775e8616cd2611beecfa23a4263d7037586789b43f035236a2e6fbd4c62',
-    'JetBrainsMono-400.woff2': '83c005d49d8a6a50474c73a5a36ac0468076e9c4a29da7bdb14995d80560a5be',
-    'JetBrainsMono-700.woff2': '83c005d49d8a6a50474c73a5a36ac0468076e9c4a29da7bdb14995d80560a5be',
-  };
-  for (const [name, hash] of Object.entries(expected)) {
-    assert.equal(sha256(fs.readFileSync(path.join(root, 'fonts', name))), hash, name);
-  }
-});
+  const staleTemp = path.join(root, '_site.tmp-stale-test');
+  const staleOld = path.join(root, '_site.old-stale-test');
+  fs.mkdirSync(staleTemp, { recursive: true });
+  fs.mkdirSync(staleOld, { recursive: true });
 
-test('fixed-output production build is deterministic, minified and complete', () => {
   let result = runBuild();
   assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.equal(fs.existsSync(staleTemp), false);
+  assert.equal(fs.existsSync(staleOld), false);
   const first = fileTreeHashes(path.join(root, '_site'));
+
   result = runBuild();
   assert.equal(result.status, 0, result.stderr || result.stdout);
   const second = fileTreeHashes(path.join(root, '_site'));
   assert.deepEqual(second, first);
 
-  const expectedFiles = [
-    'index.html', 'plateloader.css', 'plateloader.js', 'state.js', 'algo.js',
-    'algo-worker.js', 'manifest.json', 'sw.js',
-  ];
-  for (const file of expectedFiles) assert.ok(first.has(file), file);
-  assert.equal(first.has('plateloader.html'), false);
-
-  for (const file of expectedFiles) {
-    const sourceSize = fs.statSync(path.join(root, file)).size;
-    const builtSize = fs.statSync(path.join(root, '_site', file)).size;
-    assert.ok(builtSize < sourceSize, `${file}: ${builtSize} is not smaller than ${sourceSize}`);
+  for (const file of textAssets) assert.ok(first.has(file), file);
+  for (const file of textAssets.filter((file) => file !== 'sw.js')) {
+    assert.deepEqual(
+      fs.readFileSync(path.join(root, '_site', file)),
+      fs.readFileSync(path.join(root, file)),
+      `${file} should be copied without semantic rewriting`,
+    );
   }
 
-  for (const file of ['plateloader.js', 'state.js', 'algo.js', 'algo-worker.js', 'sw.js']) {
-    const parsed = spawnSync(process.execPath, ['--check', path.join('_site', file)], {
-      cwd: root,
-      encoding: 'utf8',
-    });
-    assert.equal(parsed.status, 0, `${file}: ${parsed.stderr}`);
-  }
+  const builtWorker = fs.readFileSync(path.join(root, '_site', 'sw.js'), 'utf8');
+  assert.doesNotMatch(builtWorker, /__PLATELOADER_BUILD_ID__/);
+  assert.match(builtWorker, new RegExp(`const BUILD_ID = '${expectedBuildId()}'`));
 });
 
-test('builder refuses custom output paths and symlinked _site targets', () => {
+test('the builder refuses custom output paths and symlinked _site targets', () => {
   const custom = runBuild('somewhere-else');
   assert.notEqual(custom.status, 0);
   assert.match(custom.stderr, /fixed at _site/);
@@ -232,11 +185,69 @@ test('builder refuses custom output paths and symlinked _site targets', () => {
   }
 });
 
-test('all source JavaScript parses under Node', () => {
+test('committed icons retain their compressed hashes and declared dimensions', () => {
+  const expected = {
+    'plateloader-180.png': [180, 180, '18afefdc2daa895e4be35685d3d81e422f093ab1109d4fb70a41a03426b229f1'],
+    'plateloader-192.png': [192, 192, '0b18bb505333ad69fb8a0746d91471715270ad2d93db35ceb9e2da5fa038c105'],
+    'plateloader-512-maskable.png': [512, 512, '2e388bd6f4494ed105a0c5a9b2ef8a0d2c618559431697bf3b7f32801ec212e9'],
+    'plateloader-512.png': [512, 512, 'abe366adbf6e874f40b0ef092c15b6b32fa49bee2264203c1821d7ae75057c5d'],
+  };
+  for (const [name, [width, height, hash]] of Object.entries(expected)) {
+    const file = path.join(root, 'icons', name);
+    assert.deepEqual(pngDimensions(file), [width, height]);
+    assert.equal(sha256(fs.readFileSync(file)), hash, name);
+  }
+});
+
+test('all deliberately duplicated font files remain byte-for-byte unchanged', () => {
+  const expected = {
+    'BebasNeue-400.woff2': 'a7c90c89240c134f7fdd33d40c000ec90b79d675ea53e8cc5a6d423c073de412',
+    'Inter-400.woff2': '3100e775e8616cd2611beecfa23a4263d7037586789b43f035236a2e6fbd4c62',
+    'Inter-500.woff2': '3100e775e8616cd2611beecfa23a4263d7037586789b43f035236a2e6fbd4c62',
+    'Inter-600.woff2': '3100e775e8616cd2611beecfa23a4263d7037586789b43f035236a2e6fbd4c62',
+    'JetBrainsMono-400.woff2': '83c005d49d8a6a50474c73a5a36ac0468076e9c4a29da7bdb14995d80560a5be',
+    'JetBrainsMono-700.woff2': '83c005d49d8a6a50474c73a5a36ac0468076e9c4a29da7bdb14995d80560a5be',
+  };
+  for (const [name, hash] of Object.entries(expected)) {
+    assert.equal(sha256(fs.readFileSync(path.join(root, 'fonts', name))), hash, name);
+  }
+});
+
+test('CI builds once, deploys the tested artifact and keeps the deploy job lean', () => {
+  const workflow = read('.github/workflows/pages.yml');
+  assert.equal((workflow.match(/actions\/checkout@/g) || []).length, 1);
+  assert.equal((workflow.match(/actions\/setup-node@/g) || []).length, 1);
+  assert.match(workflow, /\n  build:\n/);
+  assert.match(workflow, /needs: build/);
+  assert.match(workflow, /Run regression tests[\s\S]*Prepare static site[\s\S]*Upload GitHub Pages artifact/);
+  const deployBlock = workflow.split('\n  deploy:\n')[1];
+  assert.doesNotMatch(deployBlock, /checkout|setup-node|npm run build/);
+  assert.match(deployBlock, /actions\/deploy-pages@v4/);
+});
+
+test('package metadata and documentation describe the exact optimiser', () => {
+  const packageJson = JSON.parse(read('package.json'));
+  const readme = read('README.md');
+  assert.equal(packageJson.version, '1.2.0');
+  assert.match(readme, /Invalid entries remain visible but are skipped as physical states/);
+  assert.match(readme, /does not use a heuristic or complexity guard/);
+  assert.match(readme, /Σ√kg moved/);
+});
+
+test('all source and built JavaScript parses under Node', () => {
+  let result = runBuild();
+  assert.equal(result.status, 0, result.stderr || result.stdout);
   for (const file of [
     'algo.js', 'state.js', 'plateloader.js', 'algo-worker.js', 'sw.js', 'scripts/build-site.js',
   ]) {
-    const result = spawnSync(process.execPath, ['--check', file], { cwd: root, encoding: 'utf8' });
+    result = spawnSync(process.execPath, ['--check', file], { cwd: root, encoding: 'utf8' });
     assert.equal(result.status, 0, `${file}: ${result.stderr}`);
+  }
+  for (const file of ['algo.js', 'state.js', 'plateloader.js', 'algo-worker.js', 'sw.js']) {
+    result = spawnSync(process.execPath, ['--check', path.join('_site', file)], {
+      cwd: root,
+      encoding: 'utf8',
+    });
+    assert.equal(result.status, 0, `_site/${file}: ${result.stderr}`);
   }
 });

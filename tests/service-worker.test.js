@@ -7,19 +7,33 @@ const path = require('node:path');
 const vm = require('node:vm');
 
 const source = fs.readFileSync(path.resolve(__dirname, '..', 'sw.js'), 'utf8');
+const BUILD_PLACEHOLDER = '__PLATELOADER_BUILD_ID__';
+
+function shortHash(value) {
+  let hash = 2166136261;
+  for (let index = 0; index < value.length; index++) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(36);
+}
 
 function createHarness(options = {}) {
+  const scope = options.scope || 'https://example.test/app/';
   const listeners = {};
   const deletedCaches = [];
   const cacheEntries = new Map(options.cacheEntries || []);
   const cachePuts = [];
   const addedShells = [];
   const fetchCalls = [];
+  const openedCaches = [];
   let claimCalls = 0;
   let skipWaitingCalls = 0;
 
   const cache = {
-    async addAll(urls) { addedShells.push([...urls]); },
+    async addAll(requests) {
+      addedShells.push(requests.map((request) => ({ url: request.url, cache: request.cache })));
+    },
     async match(key) { return cacheEntries.get(String(key)); },
     async put(key, response) {
       cachePuts.push(String(key));
@@ -27,17 +41,18 @@ function createHarness(options = {}) {
     },
   };
   const caches = {
-    async open() { return cache; },
-    async keys() {
-      return options.cacheNames || ['plateloader-v10', 'plateloader-v12', 'plateloader-v13', 'other-app-v3'];
+    async open(name) {
+      openedCaches.push(name);
+      return cache;
     },
+    async keys() { return options.cacheNames || []; },
     async delete(name) {
       deletedCaches.push(name);
       return true;
     },
   };
   const self = {
-    registration: { scope: 'https://example.test/app/' },
+    registration: { scope },
     clients: { async claim() { claimCalls++; } },
     async skipWaiting() { skipWaitingCalls++; },
     addEventListener(type, listener) { listeners[type] = listener; },
@@ -54,11 +69,13 @@ function createHarness(options = {}) {
       if (options.fetch) fetchCalls.push(typeof request === 'string' ? request : request.url);
       return fetchImpl(request);
     },
-    location: new URL('https://example.test/app/'),
+    location: new URL(scope),
     URL,
     Set,
+    Request,
     Response,
     Promise,
+    Math,
   }, { filename: 'sw.js' });
 
   return {
@@ -68,6 +85,7 @@ function createHarness(options = {}) {
     cachePuts,
     addedShells,
     fetchCalls,
+    openedCaches,
     get claimCalls() { return claimCalls; },
     get skipWaitingCalls() { return skipWaitingCalls; },
   };
@@ -93,15 +111,21 @@ function dispatchExtendable(listener, extra = {}) {
   return { lifetime: Promise.all(lifetimes), lifetimes, response };
 }
 
-test('install precaches the shell but waits for the page to request activation', async () => {
+test('install uses a scope-isolated cache, bypasses HTTP cache and waits for explicit activation', async () => {
   const harness = createHarness();
   const { lifetime } = dispatchExtendable(harness.listeners.install);
   await lifetime;
 
   assert.equal(harness.addedShells.length, 1);
-  assert.ok(harness.addedShells[0].includes('https://example.test/app/index.html'));
-  assert.ok(harness.addedShells[0].includes('https://example.test/app/algo-worker.js'));
+  assert.ok(harness.addedShells[0].some((request) => request.url.endsWith('/index.html')));
+  assert.ok(harness.addedShells[0].some((request) => request.url.endsWith('/algo-worker.js')));
+  assert.ok(harness.addedShells[0].every((request) => request.cache === 'reload'));
   assert.equal(harness.skipWaitingCalls, 0);
+  assert.equal(harness.openedCaches.length, 1);
+  assert.match(
+    harness.openedCaches[0],
+    new RegExp(`^plateloader-${shortHash('https://example.test/app/')}-${BUILD_PLACEHOLDER}$`),
+  );
 });
 
 test('SKIP_WAITING messages explicitly activate the waiting worker', async () => {
@@ -113,12 +137,19 @@ test('SKIP_WAITING messages explicitly activate the waiting worker', async () =>
   assert.equal(harness.skipWaitingCalls, 1);
 });
 
-test('activation removes only obsolete Plate Loader caches', async () => {
-  const harness = createHarness();
+test('activation removes only this scope generation plus legacy unscoped caches', async () => {
+  const scope = 'https://example.test/app/';
+  const current = `plateloader-${shortHash(scope)}-${BUILD_PLACEHOLDER}`;
+  const oldScoped = `plateloader-${shortHash(scope)}-older-build`;
+  const otherScoped = `plateloader-${shortHash('https://example.test/other/')}-other-build`;
+  const harness = createHarness({
+    scope,
+    cacheNames: [current, oldScoped, otherScoped, 'plateloader-v13', 'other-app-v3'],
+  });
   const { lifetime } = dispatchExtendable(harness.listeners.activate);
   await lifetime;
 
-  assert.deepEqual(harness.deletedCaches, ['plateloader-v10', 'plateloader-v12']);
+  assert.deepEqual(harness.deletedCaches, [oldScoped, 'plateloader-v13']);
   assert.equal(harness.claimCalls, 1);
 });
 

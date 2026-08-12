@@ -11,7 +11,7 @@ self.onmessage = function (event) {
       data.weights,
       data.mode,
       data.plateMax,
-      data.PLATES,
+      data.plateKg,
       data.BAR,
       data.startStack,
       data.monotonic,
