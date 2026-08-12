@@ -5,13 +5,11 @@
   "start_url": "./",
   "scope": "./",
   "display": "standalone",
-  "orientation": "any",
   "theme_color": "#0e0f12",
   "background_color": "#0e0f12",
   "icons": [
-    { "src": "icons/plateloader-180.png",          "sizes": "180x180", "type": "image/png" },
-    { "src": "icons/plateloader-192.png",          "sizes": "192x192", "type": "image/png", "purpose": "any" },
-    { "src": "icons/plateloader-512.png",          "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/plateloader-192.png",          "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/plateloader-512.png",          "sizes": "512x512", "type": "image/png" },
     { "src": "icons/plateloader-512-maskable.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
   ]
 }

@@ -1,9 +1,8 @@
 'use strict';
 
 // Plate-loader optimisation algorithm. Self-contained — no DOM access,
-// no module imports. Used by plateloader.js on the main thread, by the
-// Web Worker (which receives the source via buildAlgoLib.toString()),
-// and by plateloader-test.html.
+// no runtime dependencies. Used by plateloader.js on the main thread, by
+// algo-worker.js through importScripts(), and by the regression tests.
 //
 // Cost depends only on the MULTISET of shared prefixes, not order. We
 // build optimal stacks level-by-level via a recursive DP:
@@ -261,4 +260,8 @@ function buildAlgoLib() {
   }
 
   return { optimize };
+}
+
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = { buildAlgoLib };
 }
