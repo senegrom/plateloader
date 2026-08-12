@@ -36,13 +36,18 @@ jobs:
           base64 --decode /tmp/plateloader-update.b64 > /tmp/plateloader-update.tar.gz
           echo "01e9cc465d2d2bacfe35ff9ad7f3e250911dc685567d47f86c805ef6883a5ceb  /tmp/plateloader-update.tar.gz" | sha256sum --check -
           tar -xzf /tmp/plateloader-update.tar.gz
-          rm -rf .agent-parts .github/workflows/materialize-agent.yml
+          rm -rf .agent-parts
           rm -f plateloader-test.html
-          git add -A
-          git diff --cached --check
+          git diff --check
           npm test
           npm run build
           rm -rf _site
+          # The Actions token may push source changes but not workflow changes.
+          # Keep workflows unchanged here; the connected GitHub app applies the
+          # already-validated workflow and removes this bootstrap in a final commit.
+          git restore --source=HEAD -- .github/workflows/pages.yml .github/workflows/materialize-agent.yml
+          git add -A
+          git diff --cached --check
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit -m "Harden caching, input handling and app shell"
