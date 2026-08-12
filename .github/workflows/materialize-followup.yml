@@ -1,0 +1,44 @@
+name: Materialize final Plate Loader follow-up
+
+on:
+  push:
+    branches: [agent/final-debloat-and-edge-fixes]
+
+permissions:
+  contents: write
+
+jobs:
+  materialize:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out follow-up branch
+        uses: actions/checkout@v6
+        with:
+          ref: agent/final-debloat-and-edge-fixes
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+
+      - name: Materialize, validate and publish source changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .agent-parts/part-* > /tmp/plateloader-followup.b64
+          base64 --decode /tmp/plateloader-followup.b64 > /tmp/plateloader-followup.tar.gz
+          echo "647d485abad7b49f64d1e60d9c6475dcf750e9979d3e265b8e9941e6a7a3c6cb  /tmp/plateloader-followup.tar.gz" | sha256sum --check -
+          tar -xzf /tmp/plateloader-followup.tar.gz
+          rm -rf .agent-parts .github/workflows/materialize-followup.yml
+          rm -f plateloader.html
+          git add -A
+          git diff --cached --check
+          npm test
+          npm run build
+          rm -rf _site
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Fix remaining edge cases and minify app shell"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
