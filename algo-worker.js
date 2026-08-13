@@ -17,7 +17,13 @@ self.onmessage = function (event) {
       data.monotonic,
       data.sided,
     );
-    self.postMessage({ reqId: data.reqId, results });
+    const requestedCount = Array.isArray(data.weights) ? data.weights.length : 0;
+    const hasStart = Boolean(
+      Array.isArray(data.startStack) &&
+      data.startStack.length &&
+      results.length === requestedCount + 1
+    );
+    self.postMessage({ reqId: data.reqId, hasStart, results });
   } catch (error) {
     self.postMessage({
       reqId: event.data?.reqId ?? -1,

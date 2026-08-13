@@ -89,6 +89,9 @@ test('HTML copy, optimisation semantics and accessibility match the application 
   assert.doesNotMatch(summary, /startClear/);
   assert.match(html, /id="startClear"[^>]*>Clear starting stack<\/button>/);
   assert.match(html, /id="startTotal"[^>]*>20 kg bar only<\/span>/);
+  assert.match(html, /id="monotonicToggle"[^>]*aria-describedby="constraintNotice"/);
+  assert.match(html, /id="constraintNotice"[^>]*role="status"[^>]*aria-live="polite"/);
+  assert.match(html, /at or below 50%, 70%, 85% and 95%, plus the exact 100% target/);
 });
 
 test('CSS retains required behavior, safe areas and no unused text-input selectors', () => {
@@ -96,7 +99,7 @@ test('CSS retains required behavior, safe areas and no unused text-input selecto
   for (const selector of [
     '.disclosure-icon', '#startDetails[open] .disclosure-icon', '.plate.added-right',
     'body.compact .set', '@media print', '@media (prefers-reduced-motion: reduce)',
-    '.update-toast', '.visually-hidden', '.invalid-msg .skip-note',
+    '.update-toast', '.visually-hidden', '.invalid-msg .skip-note', '.constraint-notice',
   ]) assert.match(css, new RegExp(selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   assert.doesNotMatch(css, /input\[type=text\]/);
   assert.match(css, /env\(safe-area-inset-top\)/);
@@ -107,7 +110,7 @@ test('CSS retains required behavior, safe areas and no unused text-input selecto
 test('UI source covers lifecycle persistence, compact worker state and stock-aware warm-ups', () => {
   const app = read('plateloader.js');
   const worker = read('algo-worker.js');
-  assert.match(app, /surrounding valid sets remain globally optimised together/);
+  assert.match(app, /this entry does not change the bar, so valid sets remain optimised together/);
   assert.match(app, /const moveLabel = \(n\) => `\$\{n\} move/);
   assert.match(app, /BAR === 0 \? 'No plates · 0 kg'/);
   assert.match(app, /const emptyLoadLabel = \(\) => BAR === 0 \? 'no plates' : 'bar only'/);
@@ -126,8 +129,14 @@ test('UI source covers lifecycle persistence, compact worker state and stock-awa
   assert.ok(app.includes('<span role="status">New version available.</span>'));
   assert.doesNotMatch(app, /toast\.setAttribute\('role', 'status'\)/);
   assert.match(app, /one final unload after every user row/);
+  assert.match(app, /stateLib\.isMonotonicStack/);
+  assert.match(app, /function renderComputeError\(error\)/);
+  assert.match(app, /worker\.postMessage\([\s\S]*catch \(error\)/);
+  assert.match(app, /results\.length === weights\.length \+ 1/);
+  assert.doesNotMatch(app, /startStack\.sort|startStack = startStack\.slice\(\)\.sort/);
   assert.doesNotMatch(app, /removedIdx|addedIdx|r\.counts|r\.isStart/);
-  assert.doesNotMatch(worker, /hasStart/);
+  assert.match(worker, /const hasStart = Boolean/);
+  assert.match(worker, /results\.length === requestedCount \+ 1/);
 });
 
 test('the optimiser uses collision-free compact state and exact branch pruning', () => {
@@ -143,6 +152,8 @@ test('the optimiser uses collision-free compact state and exact branch pruning',
   assert.match(algorithm, /maximumTargetUnits/);
   assert.match(algorithm, /Compute the downward closure once/);
   assert.match(algorithm, /function evaluate\(start, end, prefixKey, prefixUnits, recordChoices\)/);
+  assert.match(algorithm, /Monotonic starting stack must be ordered heaviest to lightest/);
+  assert.match(algorithm, /const userSetOffset = startStack \? 1 : 0/);
   assert.doesNotMatch(algorithm, /memoChoices|const fKey|combos:|comboKeys/);
   assert.doesNotMatch(algorithm, /c\[0\]<<24|four-bit-per-count limit/);
   assert.doesNotMatch(algorithm, /removedIdx|addedIdx|perSideMoves:|isEnd|isStart:/);
@@ -155,6 +166,7 @@ test('the builder removes the CodeQL finding and produces deterministic source-f
   assert.match(builder, /BUILD_PLACEHOLDER/);
   assert.match(builder, /renameSync\(temporaryOutput, output\)/);
   assert.match(builder, /_site\.lock/);
+  assert.match(builder, /owner\.runId !== runId/);
   assert.match(builder, /recoverInterruptedBuild/);
 
   const staleTemp = path.join(root, '_site.tmp-stale-test');
@@ -293,13 +305,15 @@ test('CI builds once, deploys the tested artifact and keeps the deploy job lean'
 test('package metadata and documentation describe the exact optimiser', () => {
   const packageJson = JSON.parse(read('package.json'));
   const readme = read('README.md');
-  assert.equal(packageJson.version, '1.3.0');
+  assert.equal(packageJson.version, '1.3.1');
   assert.match(readme, /Invalid entries remain visible but are skipped as physical states/);
   assert.match(readme, /does not use a heuristic or complexity guard/);
   assert.match(readme, /Σ√kg moved/);
   assert.match(readme, /collision-free mixed-radix state encoding/);
   assert.match(readme, /crash-recoverable/);
   assert.match(readme, /immutable and isolated/);
+  assert.match(readme, /projected downward/);
+  assert.match(readme, /rejected rather than silently rearranged/);
   assert.equal(JSON.parse(read('manifest.json')).id, './');
 });
 

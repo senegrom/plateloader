@@ -27,28 +27,45 @@ function createHarness(options = {}) {
 
   const cache = {
     async addAll(requests) {
+      if (options.addAllError) throw new Error('addAll failed');
       addedShells.push(requests.map((request) => ({ url: request.url, cache: request.cache })));
     },
-    async match(key) { return cacheEntries.get(String(key)); },
+    async match(key) {
+      if (options.matchError) throw new Error('match failed');
+      return cacheEntries.get(String(key));
+    },
     async put(key, response) {
       cachePuts.push(String(key));
+      if (options.putError) throw new Error('put failed');
       cacheEntries.set(String(key), response);
     },
   };
   const caches = {
     async open(name) {
       openedCaches.push(name);
+      if (options.openError) throw new Error('open failed');
       return cache;
     },
-    async keys() { return options.cacheNames || []; },
+    async keys() {
+      if (options.keysError) throw new Error('keys failed');
+      return options.cacheNames || [];
+    },
     async delete(name) {
       deletedCaches.push(name);
+      if (options.deleteError || (options.deleteErrors || []).includes(name)) {
+        throw new Error('delete failed');
+      }
       return true;
     },
   };
   const self = {
     registration: { scope },
-    clients: { async claim() { claimCalls++; } },
+    clients: {
+      async claim() {
+        claimCalls++;
+        if (options.claimError) throw new Error('claim failed');
+      },
+    },
     async skipWaiting() { skipWaitingCalls++; },
     addEventListener(type, listener) { listeners[type] = listener; },
   };
@@ -145,6 +162,21 @@ test('activation removes only obsolete generations for this exact deployment sco
   assert.equal(harness.claimCalls, 1);
 });
 
+test('activation remains successful when cache enumeration or deletion fails', async () => {
+  const scope = 'https://example.test/app/';
+  const oldScoped = `${cachePrefix(scope)}older-build`;
+  let harness = createHarness({ scope, cacheNames: [oldScoped], deleteError: true });
+  let dispatched = dispatchExtendable(harness.listeners.activate);
+  await dispatched.lifetime;
+  assert.deepEqual(harness.deletedCaches, [oldScoped]);
+  assert.equal(harness.claimCalls, 1);
+
+  harness = createHarness({ scope, keysError: true, claimError: true });
+  dispatched = dispatchExtendable(harness.listeners.activate);
+  await dispatched.lifetime;
+  assert.equal(harness.claimCalls, 1);
+});
+
 test('cached shell assets are immutable and never refreshed by an older worker', async () => {
   const url = 'https://example.test/app/plateloader.js';
   const harness = createHarness({ cacheEntries: [[url, new Response('cached')]] });
@@ -167,6 +199,24 @@ test('a shell cache miss bypasses HTTP cache and is stored in the current genera
   assert.equal(await (await response).text(), 'network');
   assert.deepEqual(harness.fetchCalls, [{ url, cache: 'reload' }]);
   assert.deepEqual(harness.cachePuts, [url]);
+});
+
+test('cache failures never discard a successful network response', async () => {
+  const url = 'https://example.test/app/plateloader.js';
+  const request = { method: 'GET', url, mode: 'cors', destination: 'script' };
+
+  for (const options of [
+    { openError: true },
+    { matchError: true },
+    { putError: true },
+  ]) {
+    const harness = createHarness(options);
+    const { response } = dispatchExtendable(harness.listeners.fetch, { request });
+    const result = await response;
+    assert.equal(result.status, 200);
+    assert.equal(await result.text(), 'network');
+    assert.deepEqual(harness.fetchCalls, [{ url, cache: 'reload' }]);
+  }
 });
 
 test('scope navigation falls back to cached index when offline', async () => {

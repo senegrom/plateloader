@@ -72,7 +72,15 @@ function buildAlgoLib() {
           throw new RangeError('Starting stack contains an invalid plate index');
         }
       }
-      if (monotonic) startStack.sort((a, b) => a - b);
+      if (monotonic) {
+        for (let index = 1; index < startStack.length; index++) {
+          if (startStack[index] < startStack[index - 1]) {
+            throw new RangeError(
+              'Monotonic starting stack must be ordered heaviest to lightest',
+            );
+          }
+        }
+      }
 
       let startKg = BAR;
       const startCounts = new Array(NP).fill(0);
@@ -321,12 +329,21 @@ function buildAlgoLib() {
     });
 
     // Invalid user entries are display annotations, not physical bar states.
+    // A pinned starting stack matters only when at least one requested set can
+    // actually be performed; otherwise do not invent a START/UNLOAD-only plan.
+    const userSetOffset = startStack ? 1 : 0;
+    const userSets = sets.slice(userSetOffset);
+    if (!userSets.some((set) => !set.invalid)) {
+      return userSets.map((set) => ({
+        valid: false,
+        total: set.total,
+        reason: set.reason,
+      }));
+    }
+
     // Optimise all valid entries together, then reinsert invalid rows without
     // forcing an unload/reload boundary.
     const activeSets = sets.filter((set) => !set.invalid);
-    if (activeSets.length === 0) {
-      return sets.map((set) => ({ valid: false, total: set.total, reason: set.reason }));
-    }
 
     const primaryPlateCost = new Float64Array(NP);
     const secondaryPlateCost = new Float64Array(NP);

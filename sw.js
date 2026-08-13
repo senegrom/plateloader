@@ -58,16 +58,21 @@ self.addEventListener('install', (event) => {
   );
 });
 
-self.addEventListener('activate', (event) => {
-  event.waitUntil(
-    caches.keys()
-      .then((names) => Promise.all(
-        names
-          .filter((name) => name.startsWith(CACHE_PREFIX) && name !== CACHE_VERSION)
-          .map((name) => caches.delete(name)),
-      ))
-      .then(() => self.clients.claim()),
+async function activateCurrentGeneration() {
+  let names = [];
+  try { names = await caches.keys(); } catch (_) {}
+  await Promise.all(
+    names
+      .filter((name) => name.startsWith(CACHE_PREFIX) && name !== CACHE_VERSION)
+      .map(async (name) => {
+        try { await caches.delete(name); } catch (_) {}
+      }),
   );
+  try { await self.clients.claim(); } catch (_) {}
+}
+
+self.addEventListener('activate', (event) => {
+  event.waitUntil(activateCurrentGeneration());
 });
 
 self.addEventListener('message', (event) => {
@@ -77,18 +82,29 @@ self.addEventListener('message', (event) => {
 });
 
 async function cachedShellResponse(cacheKey, isNavigation) {
-  const cache = await caches.open(CACHE_VERSION);
-  const cached = await cache.match(cacheKey);
-  if (cached) return cached;
-
+  let cache = null;
   try {
-    const response = await fetch(new Request(cacheKey, { cache: 'reload' }));
-    if (response && response.ok) await cache.put(cacheKey, response.clone());
-    return response || Response.error();
-  } catch (_) {
-    if (!isNavigation) return Response.error();
-    return await cache.match(INDEX_URL) || Response.error();
+    cache = await caches.open(CACHE_VERSION);
+    const cached = await cache.match(cacheKey);
+    if (cached) return cached;
+  } catch (_) {}
+
+  let response = null;
+  try {
+    response = await fetch(new Request(cacheKey, { cache: 'reload' }));
+  } catch (_) {}
+
+  if (response) {
+    if (cache && response.ok) {
+      try { await cache.put(cacheKey, response.clone()); } catch (_) {}
+    }
+    return response;
   }
+
+  if (isNavigation && cache) {
+    try { return await cache.match(INDEX_URL) || Response.error(); } catch (_) {}
+  }
+  return Response.error();
 }
 
 self.addEventListener('fetch', (event) => {

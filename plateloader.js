@@ -62,7 +62,7 @@ function ensureAlgoWorker() {
   try {
     const worker = new Worker('algo-worker.js');
     worker.onmessage = (event) => {
-      const { reqId, results, error } = event.data;
+      const { reqId, results, error, hasStart } = event.data;
       if (inflightReqId === reqId) inflightReqId = null;
       clearIndicator(reqId);
       if (reqId !== currentReqId) return;
@@ -73,7 +73,7 @@ function ensureAlgoWorker() {
         return;
       }
       workerEverSucceeded = true;
-      renderResults(results, startStack !== null);
+      renderResults(results, hasStart === true);
     };
     worker.onerror = (event) => {
       // Quiet on first failure (usually a worker-policy restriction); log if
@@ -133,6 +133,18 @@ function renderInputErrors(errors) {
 function clearInputErrorState() {
   inputEl.removeAttribute('aria-invalid');
   inputEl.removeAttribute('aria-errormessage');
+}
+
+function renderComputeError(error) {
+  clearIndicator();
+  inflightReqId = null;
+  const message = 'Could not compute this sequence. Check the settings and try again.';
+  $('summaryPanel').hidden = true;
+  $('output').innerHTML = `<div class="panel input-error" role="alert">
+    <strong>Computation failed.</strong> ${message}
+  </div>`;
+  announceStatus(message);
+  console.error('[plate-loader] computation failed:', error);
 }
 
 function renderPlate(plateIdx, opts) {
@@ -243,7 +255,7 @@ function renderResults(results, hasStart) {
           <div class="set-total">${r.total}<span class="unit">kg</span></div>
           <div class="set-changes"><span class="delta many">invalid</span></div>
         </div>
-        <div class="invalid-msg">${esc(r.reason)}<span class="skip-note">Skipped; surrounding valid sets remain globally optimised together.</span></div>`;
+        <div class="invalid-msg">${esc(r.reason)}<span class="skip-note">Skipped; this entry does not change the bar, so valid sets remain optimised together.</span></div>`;
       fragment.appendChild(card);
       continue;
     }
@@ -354,6 +366,7 @@ const startClearBtn  = $('startClear');
 const startRemoveBtn = $('startRemove');
 const monotonicToggle = $('monotonicToggle');
 const oneSidedToggle  = $('oneSidedToggle');
+const constraintNoticeEl = $('constraintNotice');
 const modesEl = $('modes');
 const modeButtons = Array.from(modesEl.querySelectorAll('.mode-btn'));
 let monotonic = false;
@@ -422,6 +435,15 @@ function renderStartViz() {
   startVizEl.innerHTML = renderBarRow(startStack, [], { animateChanges: false, label: false });
 }
 
+function showConstraintNotice(message) {
+  constraintNoticeEl.textContent = message;
+  constraintNoticeEl.hidden = !message;
+}
+
+function clearConstraintNotice() {
+  showConstraintNotice('');
+}
+
 function updateStartControls() {
   const hasStack = !!(startStack && startStack.length);
   startClearBtn.disabled = !hasStack;
@@ -432,22 +454,38 @@ function updateStartControls() {
 }
 
 function setStartStack(arr) {
-  startStack = normaliseStack(arr);
-  if (monotonic && startStack) startStack.sort((a, b) => a - b);  // non-decreasing idx = weight non-increasing
+  const nextStack = normaliseStack(arr);
+  if (monotonic && nextStack && !stateLib.isMonotonicStack(nextStack)) {
+    showConstraintNotice(
+      'Monotonic mode preserves the declared order: add plates from heaviest to lightest.',
+    );
+    return false;
+  }
+
+  startStack = nextStack;
+  clearConstraintNotice();
   updateStartControls();
   updateStartTotalDisplay();
   renderStartViz();
   updateWarmupConstraints();
+  return true;
 }
 
 function setMonotonic(on) {
-  monotonic = !!on;
-  monotonicToggle.checked = monotonic;
-  if (monotonic && startStack) {  // re-sort existing start stack
-    startStack = startStack.slice().sort((a, b) => a - b);
-    updateStartControls();
-    renderStartViz();
+  const requested = !!on;
+  if (requested && startStack && !stateLib.isMonotonicStack(startStack)) {
+    monotonic = false;
+    monotonicToggle.checked = false;
+    showConstraintNotice(
+      'Monotonic mode was not enabled because the starting stack is not ordered heaviest to lightest.',
+    );
+    return false;
   }
+
+  monotonic = requested;
+  monotonicToggle.checked = monotonic;
+  clearConstraintNotice();
+  return true;
 }
 
 function setOneSided(on) {
@@ -505,9 +543,22 @@ function onStartButtonClick(e) {
   }
   const arr = startStack ? startStack.slice() : [];
   arr.push(idx);
-  if (!normaliseStack(arr)) return;  // at cap — ignore click (setStartStack would clear all)
-  setStartStack(arr);
-  finishStartChange();
+  if (!normaliseStack(arr)) {
+    showConstraintNotice('Starting stack limit reached. Remove a plate before adding another.');
+    return;
+  }
+  if (monotonic && !stateLib.isMonotonicStack(arr)) {
+    const outer = startStack && startStack.length
+      ? PLATES[startStack[startStack.length - 1]].label
+      : null;
+    showConstraintNotice(
+      outer
+        ? `Monotonic mode requires the next plate to be ${outer} kg or lighter.`
+        : 'Monotonic mode requires plates to be added heaviest to lightest.',
+    );
+    return;
+  }
+  if (setStartStack(arr)) finishStartChange();
 }
 
 function onStartButtonContextMenu(e) {
@@ -602,11 +653,6 @@ function compute(forceSync) {
     return;
   }
 
-  // Starting stack: the algorithm prepends a pinned "starting state" set
-  // when startStack is non-null. renderResults marks it differently and
-  // skips its loading cost in totals.
-  const hasStart = (startStack !== null);
-
   const showIndicator = () => {
     if (currentReqId !== reqId) return;
     out.innerHTML = '<div class="panel computing-indicator">Computing…</div>';
@@ -614,23 +660,31 @@ function compute(forceSync) {
     announceStatus('Computing plate sequence.');
   };
 
+  const requestedStartStack = startStack ? startStack.slice() : null;
   const worker = forceSync ? null : ensureAlgoWorker();
   if (worker) {
     inflightReqId = reqId;
     indicatorReqId = reqId;
     indicatorTimer = setTimeout(showIndicator, INDICATOR_DELAY_MS);
-    worker.postMessage({
-      reqId,
-      weights,
-      mode: CURRENT_MODE,
-      plateMax: plateMax.slice(),
-      plateKg: PLATE_KG,
-      BAR,
-      startStack,
-      monotonic,
-      sided: sided(),
-    });
-    return;
+    try {
+      worker.postMessage({
+        reqId,
+        weights,
+        mode: CURRENT_MODE,
+        plateMax: plateMax.slice(),
+        plateKg: PLATE_KG,
+        BAR,
+        startStack: requestedStartStack,
+        monotonic,
+        sided: sided(),
+      });
+      return;
+    } catch (error) {
+      console.warn('[plate-loader] worker message failed, retrying sync:', error);
+      disposeAlgoWorker(false);
+      compute(true);
+      return;
+    }
   }
 
   // Sync path: yield twice via rAF so the indicator paints BEFORE optimize()
@@ -641,7 +695,18 @@ function compute(forceSync) {
     showIndicator();
     requestAnimationFrame(() => {
       if (currentReqId !== reqId) return;
-      renderResults(algoLib.optimize(weights, CURRENT_MODE, plateMax, PLATE_KG, BAR, startStack, monotonic, sided()), hasStart);
+      try {
+        const results = algoLib.optimize(
+          weights, CURRENT_MODE, plateMax, PLATE_KG, BAR,
+          requestedStartStack, monotonic, sided(),
+        );
+        const resultHasStart = Boolean(
+          requestedStartStack && results.length === weights.length + 1
+        );
+        renderResults(results, resultHasStart);
+      } catch (error) {
+        if (currentReqId === reqId) renderComputeError(error);
+      }
     });
   });
 }
@@ -687,7 +752,7 @@ function updateWarmupConstraints() {
   if (button) button.disabled = !enabled;
   if (note) {
     note.textContent = enabled
-      ? `Will create loadable sets at 50%, 70%, 85%, 95% and 100% (smallest denomination step ${fmtKg(warmupIncrement())} kg; maximum ${fmtKg(maximum)} kg).`
+      ? `Will create loadable sets at or below 50%, 70%, 85% and 95%, plus the exact 100% target (smallest denomination step ${fmtKg(warmupIncrement())} kg; maximum ${fmtKg(maximum)} kg).`
       : 'No positive load is possible with the selected bar and available plates.';
   }
 }
@@ -716,9 +781,10 @@ function applyState(state) {
   setMode(['count', 'kg', 'sqrt'].includes(next.mode) ? next.mode : DEFAULT_MODE);
   setStock(next.stock);
   setBar(Number.isFinite(next.bar) ? next.bar : DEFAULT_BAR);
-  setMonotonic(next.monotonic === true);
   setOneSided(next.oneSided === true);
+  setMonotonic(false);  // clear the previous state's constraint before restoring order
   setStartStack(Array.isArray(next.startStack) ? next.startStack : null);
+  setMonotonic(next.monotonic === true);
   setCompact(next.compact === true);
   startDetails.open = Boolean(startStack && startStack.length);
 }
@@ -804,8 +870,8 @@ stockSlider.addEventListener('input', () => {
 barSelect.addEventListener('change', () => { setBar(barSelect.value); persistAndRecompute(); });
 
 monotonicToggle.addEventListener('change', () => {
-  setMonotonic(monotonicToggle.checked);
-  persistAndRecompute();
+  if (setMonotonic(monotonicToggle.checked)) persistAndRecompute();
+  else persist();
 });
 
 oneSidedToggle.addEventListener('change', () => {

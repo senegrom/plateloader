@@ -91,6 +91,14 @@ test('integer clamping never uses signed 32-bit coercion', () => {
   assert.equal(state.clampInteger('not-a-number', 0, 6, 2), 2);
 });
 
+test('monotonic stack validation preserves the declared physical order', () => {
+  assert.equal(state.isMonotonicStack(null), true);
+  assert.equal(state.isMonotonicStack([]), true);
+  assert.equal(state.isMonotonicStack([1, 1, 4, 6]), true);
+  assert.equal(state.isMonotonicStack([4, 3]), false);
+  assert.equal(state.isMonotonicStack([1, -1]), false);
+});
+
 test('bar descriptions preserve plate order and describe a zero-weight bar honestly', () => {
   assert.equal(
     state.describeBar([1, 4, 1], plates, 20, false),
@@ -123,7 +131,7 @@ test('warm-ups use the derived increment for the selected sidedness', () => {
   );
   assert.deepEqual(
     state.generateWarmup(42.5, { bar: 20, sided: 1, plates }),
-    [21.25, 30, 36.25, 40, 42.5],
+    [21.25, 28.75, 35, 40, 42.5],
   );
 });
 
@@ -156,6 +164,15 @@ test('stock-aware warm-ups use only loadable weights and respect true bounds', (
   );
 });
 
+test('warm-up percentages never overshoot their intended load', () => {
+  assert.deepEqual(
+    state.generateWarmup(100, {
+      bar: 20, sided: 2, plates: [{ kg: 20 }], maxima: [2],
+    }),
+    [20, 60, 100],
+  );
+});
+
 test('invalid warm-up targets return no generated sets', () => {
   assert.deepEqual(state.generateWarmup(NaN, { bar: 20, sided: 2, plates }), []);
   assert.deepEqual(state.generateWarmup(-10, { bar: 20, sided: 2, plates }), []);
@@ -167,6 +184,12 @@ test('zero-bar warm-ups never generate a zero-weight set', () => {
   assert.deepEqual(state.generateWarmup(1, { bar: 0, sided: 2, plates }), []);
   assert.deepEqual(state.generateWarmup(2.5, { bar: 0, sided: 2, plates }), [2.5]);
   assert.deepEqual(state.generateWarmup(1.25, { bar: 0, sided: 1, plates }), [1.25]);
+  assert.deepEqual(state.generateWarmup(2.5, {
+    bar: 0, sided: 1, plates: [{ kg: 2.5 }], maxima: [1],
+  }), [2.5]);
+  assert.deepEqual(state.generateWarmup(5, {
+    bar: 0, sided: 2, plates: [{ kg: 2.5 }], maxima: [1],
+  }), [5]);
   assert.equal(state.minTotalWeight(plates, plates.map(() => 0), 0, 2), Infinity);
 });
 

@@ -301,6 +301,7 @@
     cursor: pointer; user-select: none;
   }
   .constraint-toggle:first-of-type { margin-top: 14px; }
+  .constraint-notice { color: var(--warn); }
   #lbl-mode { margin-top: 16px; }
   .config-actions { margin-top: 14px; }
   .shortcut-hint { margin-top: 6px; }
