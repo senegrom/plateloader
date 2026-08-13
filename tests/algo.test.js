@@ -261,12 +261,10 @@ test('invalid entries stay visible but do not force an unload boundary', () => {
   const filtered = algo.optimize([60, 80], 'count', plateMax, PLATES, BAR, null, false, 2);
 
   assert.equal(bridged[1].valid, false);
-  assert.equal(bridged[1].skipped, true);
   assert.match(bridged[1].reason, /available plate denominations/);
   assert.deepEqual(resultObjective(bridged, 'count'), resultObjective(filtered, 'count'));
   assert.deepEqual(resultObjective(bridged, 'count'), [8, 120]);
   assert.equal(bridged[0].cleanup, undefined);
-  assert.equal(bridged[2].isStart, false);
   assert.ok(bridged[2].cleanup);
 });
 
@@ -306,15 +304,58 @@ test('a pinned starting stack remains ordered and can exceed the selected stock 
   assert.deepEqual(results[1].stack, [1]);
 });
 
+test('mixed-radix state encoding remains exact beyond fifteen plates of one type', () => {
+  const results = algo.optimize(
+    [18.75, 20],
+    'count',
+    [20],
+    [1.25],
+    0,
+    null,
+    false,
+    1,
+  );
+  assert.equal(results[0].stack.length, 15);
+  assert.equal(results[1].stack.length, 16);
+  assert.equal(results[1].addedCount, 1);
+  assert.equal(results[1].cleanup.bothSidesMoves, 16);
+});
+
+test('monotonic direct-API inputs must be ordered heaviest to lightest', () => {
+  assert.throws(
+    () => algo.optimize([25], 'count', [2, 2], [1.25, 2.5], 20, null, true, 2),
+    /ordered heaviest to lightest/,
+  );
+});
+
+test('inventory irrelevant to every valid target is removed without changing exactness', () => {
+  const hugeStock = PLATES.map(() => 1_000_000_000);
+  const results = algo.optimize(
+    [22.5, 1_000_000_000.1],
+    'count',
+    hugeStock,
+    PLATES,
+    BAR,
+    null,
+    false,
+    2,
+  );
+
+  assert.equal(results[0].valid, true);
+  assert.deepEqual(results[0].stack, [6]);
+  assert.equal(results[1].valid, false);
+  assert.match(results[1].reason, /available plate denominations/);
+});
+
 test('worker-facing result objects omit derivable and unused payload fields', () => {
   const results = algo.optimize([60, 80], 'count', PLATES.map(() => 2), PLATES, BAR, null, false, 2);
   for (const result of results.filter((entry) => entry.valid)) {
-    for (const unused of ['counts', 'removedIdx', 'addedIdx', 'perSide', 'perSideMoves', 'isEnd']) {
-      assert.equal(unused in result, false, unused);
-    }
+    for (const unused of [
+      'counts', 'removedIdx', 'addedIdx', 'perSide', 'perSideMoves', 'isEnd', 'isStart',
+    ]) assert.equal(unused in result, false, unused);
     assert.equal(Number.isInteger(result.removedCount), true);
     assert.equal(Number.isInteger(result.addedCount), true);
   }
   assert.equal('removedIdx' in results.at(-1).cleanup, false);
-  assert.equal(Number.isInteger(results.at(-1).cleanup.removedCount), true);
+  assert.equal('removedCount' in results.at(-1).cleanup, false);
 });

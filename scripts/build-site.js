@@ -10,8 +10,12 @@ if (process.argv.length > 2) {
 }
 
 const output = path.join(root, '_site');
-const temporaryOutput = `${output}.tmp-${process.pid}`;
-const backupOutput = `${output}.old-${process.pid}`;
+const runId = `${process.pid}-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
+const temporaryOutput = `${output}.tmp-${runId}`;
+const backupOutput = `${output}.old-${runId}`;
+const lockDirectory = path.join(root, '_site.lock');
+const LOCK_STALE_MS = 60 * 60 * 1000;
+const BUILD_STALE_MS = 24 * 60 * 60 * 1000;
 const BUILD_PLACEHOLDER = '__PLATELOADER_BUILD_ID__';
 const textAssets = [
   'index.html',
@@ -48,11 +52,19 @@ function assertDirectory(directory) {
   inspect(source);
 }
 
+function assertOutputDirectory() {
+  if (!fs.existsSync(output)) return;
+  const stat = fs.lstatSync(output);
+  if (stat.isSymbolicLink() || !stat.isDirectory()) {
+    throw new Error(`Refusing invalid build output: ${output}`);
+  }
+}
+
 function listFiles(directory, relativeRoot = directory) {
   const files = [];
   const visit = (current, relative) => {
     for (const entry of fs.readdirSync(current, { withFileTypes: true })
-      .sort((left, right) => left.name.localeCompare(right.name))) {
+      .sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0)) {
       const absolute = path.join(current, entry.name);
       const childRelative = path.join(relative, entry.name);
       if (entry.isDirectory()) visit(absolute, childRelative);
@@ -69,10 +81,10 @@ function buildId() {
   const files = [
     ...textAssets,
     ...assetDirectories.flatMap((directory) => listFiles(directory)),
-  ].sort();
+  ].sort((left, right) => left < right ? -1 : left > right ? 1 : 0);
 
   for (const file of files) {
-    hash.update(file);
+    hash.update(file.split(path.sep).join('/'));
     hash.update('\0');
     hash.update(fs.readFileSync(path.join(root, file)));
     hash.update('\0');
@@ -80,63 +92,130 @@ function buildId() {
   return `v${packageJson.version}-${hash.digest('hex').slice(0, 12)}`;
 }
 
-function cleanStaleBuildDirectories() {
-  for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
-    if (!/^_site\.(?:tmp|old)-/.test(entry.name)) continue;
-    fs.rmSync(path.join(root, entry.name), { recursive: true, force: true });
+function removeBuildPath(target) {
+  if (!fs.existsSync(target)) return;
+  const stat = fs.lstatSync(target);
+  if (stat.isSymbolicLink()) fs.unlinkSync(target);
+  else fs.rmSync(target, { recursive: true, force: true });
+}
+
+function acquireBuildLock() {
+  const tryAcquire = () => {
+    fs.mkdirSync(lockDirectory);
+    try {
+      fs.writeFileSync(path.join(lockDirectory, 'owner.json'), JSON.stringify({
+        pid: process.pid,
+        startedAt: new Date().toISOString(),
+      }));
+    } catch (error) {
+      removeBuildPath(lockDirectory);
+      throw error;
+    }
+  };
+
+  try {
+    tryAcquire();
+    return;
+  } catch (error) {
+    if (!error || error.code !== 'EEXIST') throw error;
+  }
+
+  const lockStat = fs.lstatSync(lockDirectory);
+  if (lockStat.isSymbolicLink() || !lockStat.isDirectory()) {
+    throw new Error(`Refusing invalid build lock: ${lockDirectory}`);
+  }
+  if (Date.now() - lockStat.mtimeMs <= LOCK_STALE_MS) {
+    throw new Error(`Another build appears to be running: ${lockDirectory}`);
+  }
+
+  removeBuildPath(lockDirectory);
+  tryAcquire();
+}
+
+function releaseBuildLock() {
+  removeBuildPath(lockDirectory);
+}
+
+function matchingBuildDirectories(kind) {
+  const pattern = new RegExp(`^_site\\.${kind}-`);
+  return fs.readdirSync(root, { withFileTypes: true })
+    .filter((entry) => pattern.test(entry.name))
+    .map((entry) => {
+      const target = path.join(root, entry.name);
+      return { target, stat: fs.lstatSync(target) };
+    });
+}
+
+function recoverInterruptedBuild() {
+  if (fs.existsSync(output)) return;
+  const backups = matchingBuildDirectories('old')
+    .filter(({ stat }) => !stat.isSymbolicLink() && stat.isDirectory())
+    .sort((left, right) => right.stat.mtimeMs - left.stat.mtimeMs);
+  if (backups.length > 0) fs.renameSync(backups[0].target, output);
+}
+
+function pruneStaleBuildDirectories() {
+  const cutoff = Date.now() - BUILD_STALE_MS;
+  for (const kind of ['tmp', 'old']) {
+    for (const { target, stat } of matchingBuildDirectories(kind)) {
+      if (stat.mtimeMs < cutoff) removeBuildPath(target);
+    }
   }
 }
 
 function writeSite() {
-  for (const file of textAssets) assertRegularFile(file);
-  for (const directory of assetDirectories) assertDirectory(directory);
-
-  if (fs.existsSync(output) && fs.lstatSync(output).isSymbolicLink()) {
-    throw new Error(`Refusing symlinked build output: ${output}`);
-  }
-
-  cleanStaleBuildDirectories();
-  fs.mkdirSync(temporaryOutput, { recursive: true });
-  const id = buildId();
-
+  acquireBuildLock();
   try {
-    for (const file of textAssets) {
-      const source = fs.readFileSync(path.join(root, file), 'utf8');
-      let outputText = source;
-      if (file === 'sw.js') {
-        const occurrences = source.split(BUILD_PLACEHOLDER).length - 1;
-        if (occurrences !== 1) {
-          throw new Error(`Expected one ${BUILD_PLACEHOLDER} marker in sw.js; found ${occurrences}.`);
-        }
-        outputText = source.replace(BUILD_PLACEHOLDER, id);
-      }
-      fs.writeFileSync(path.join(temporaryOutput, file), outputText);
-    }
+    recoverInterruptedBuild();
+    assertOutputDirectory();
 
-    for (const directory of assetDirectories) {
-      fs.cpSync(path.join(root, directory), path.join(temporaryOutput, directory), { recursive: true });
-    }
-
-    let backedUp = false;
-    if (fs.existsSync(output)) {
-      fs.renameSync(output, backupOutput);
-      backedUp = true;
-    }
+    for (const file of textAssets) assertRegularFile(file);
+    for (const directory of assetDirectories) assertDirectory(directory);
+    fs.mkdirSync(temporaryOutput);
+    const id = buildId();
 
     try {
-      fs.renameSync(temporaryOutput, output);
+      for (const file of textAssets) {
+        const source = fs.readFileSync(path.join(root, file), 'utf8');
+        let outputText = source;
+        if (file === 'sw.js') {
+          const occurrences = source.split(BUILD_PLACEHOLDER).length - 1;
+          if (occurrences !== 1) {
+            throw new Error(`Expected one ${BUILD_PLACEHOLDER} marker in sw.js; found ${occurrences}.`);
+          }
+          outputText = source.replace(BUILD_PLACEHOLDER, id);
+        }
+        fs.writeFileSync(path.join(temporaryOutput, file), outputText);
+      }
+
+      for (const directory of assetDirectories) {
+        fs.cpSync(path.join(root, directory), path.join(temporaryOutput, directory), { recursive: true });
+      }
+
+      let backedUp = false;
+      if (fs.existsSync(output)) {
+        fs.renameSync(output, backupOutput);
+        backedUp = true;
+      }
+
+      try {
+        fs.renameSync(temporaryOutput, output);
+      } catch (error) {
+        if (backedUp && !fs.existsSync(output)) fs.renameSync(backupOutput, output);
+        throw error;
+      }
+
+      if (backedUp) removeBuildPath(backupOutput);
+      pruneStaleBuildDirectories();
     } catch (error) {
-      if (backedUp && !fs.existsSync(output)) fs.renameSync(backupOutput, output);
+      removeBuildPath(temporaryOutput);
+      if (fs.existsSync(backupOutput) && !fs.existsSync(output)) {
+        fs.renameSync(backupOutput, output);
+      }
       throw error;
     }
-
-    if (backedUp) fs.rmSync(backupOutput, { recursive: true, force: true });
-  } catch (error) {
-    fs.rmSync(temporaryOutput, { recursive: true, force: true });
-    if (fs.existsSync(backupOutput) && !fs.existsSync(output)) {
-      fs.renameSync(backupOutput, output);
-    }
-    throw error;
+  } finally {
+    releaseBuildLock();
   }
 }
 

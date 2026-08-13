@@ -24,44 +24,174 @@ function buildStateLib() {
     return Number(typeof plate === 'number' ? plate : plate && plate.kg);
   }
 
-  // The optimiser represents weights in quarter-kilogram units. Derive the
-  // actual total-weight lattice from the available denominations rather than
-  // assuming theoretical 0.25 kg plates exist.
+  function quarterUnits(plate) {
+    const exact = plateKg(plate) * 4;
+    const rounded = Math.round(exact);
+    return Number.isFinite(exact) && rounded > 0 && Math.abs(exact - rounded) <= 1e-6
+      ? rounded : 0;
+  }
+
+  // Derive the actual total-weight lattice from the available denominations
+  // rather than assuming theoretical 0.25 kg plates exist.
   function totalIncrement(plates, sided = 2) {
     const sideCount = sided === 1 ? 1 : 2;
     const units = (Array.isArray(plates) ? plates : [])
-      .map((plate) => Math.round(plateKg(plate) * 4))
-      .filter((unit) => Number.isInteger(unit) && unit > 0);
+      .map(quarterUnits)
+      .filter((unit) => unit > 0);
     if (units.length === 0) return sideCount * 1.25;
     const unitGcd = units.reduce((result, unit) => gcd(result, unit));
     return Number(((unitGcd * sideCount) / 4).toFixed(6));
   }
 
+  function normaliseStock(plates, maxima) {
+    const length = Array.isArray(plates) ? plates.length : 0;
+    return Array.from({ length }, (_, index) => {
+      const count = Number(Array.isArray(maxima) ? maxima[index] : 0);
+      return Number.isFinite(count) && count > 0 ? Math.trunc(count) : 0;
+    });
+  }
+
+  function reachableProfile(plates, maxima) {
+    const safePlates = Array.isArray(plates) ? plates : [];
+    const stock = normaliseStock(safePlates, maxima);
+    const units = safePlates.map(quarterUnits);
+    const maximum = units.reduce((sum, unit, index) => sum + unit * stock[index], 0);
+    const reachable = new Uint8Array(maximum + 1);
+    reachable[0] = 1;
+
+    for (let index = 0; index < units.length; index++) {
+      const unit = units[index];
+      if (unit <= 0) continue;
+      for (let copy = 0; copy < stock[index]; copy++) {
+        for (let total = maximum - unit; total >= 0; total--) {
+          if (reachable[total]) reachable[total + unit] = 1;
+        }
+      }
+    }
+    return { maximum, reachable };
+  }
+
+  function normaliseBar(bar) {
+    const value = Number(bar);
+    return Number.isFinite(value) && value >= 0 ? value : 20;
+  }
+
+  function minTotalWeight(plates, maxima, bar = 20, sided = 2) {
+    const safeBar = normaliseBar(bar);
+    if (safeBar > 0) return safeBar;
+
+    const sideCount = sided === 1 ? 1 : 2;
+    const profile = reachableProfile(plates, maxima);
+    for (let units = 1; units <= profile.maximum; units++) {
+      if (profile.reachable[units]) {
+        return Number((units * sideCount / 4).toFixed(6));
+      }
+    }
+    return Infinity;
+  }
+
+  function maxTotalWeight(plates, maxima, bar = 20, sided = 2, ceiling = Infinity) {
+    const safeBar = normaliseBar(bar);
+    const sideCount = sided === 1 ? 1 : 2;
+    const profile = reachableProfile(plates, maxima);
+    const numericCeiling = Number(ceiling);
+    let maximumUnits = profile.maximum;
+
+    if (Number.isFinite(numericCeiling)) {
+      if (numericCeiling < safeBar) return -Infinity;
+      maximumUnits = Math.min(
+        maximumUnits,
+        Math.floor((numericCeiling - safeBar) * 4 / sideCount + 1e-6),
+      );
+      while (maximumUnits >= 0 && !profile.reachable[maximumUnits]) maximumUnits--;
+      if (maximumUnits < 0) return -Infinity;
+    }
+
+    return Number((safeBar + sideCount * maximumUnits / 4).toFixed(6));
+  }
+
+  function isAchievableTotal(total, options = {}) {
+    const bar = normaliseBar(options.bar);
+    const sideCount = options.sided === 1 ? 1 : 2;
+    const value = Number(total);
+    if (!Number.isFinite(value) || value < bar) return false;
+
+    const exactUnits = (value - bar) * 4 / sideCount;
+    const targetUnits = Math.round(exactUnits);
+    if (Math.abs(exactUnits - targetUnits) > 1e-6) return false;
+    const profile = reachableProfile(options.plates, options.maxima);
+    return targetUnits <= profile.maximum && profile.reachable[targetUnits] === 1;
+  }
+
   function describeBar(stack, plates, bar, oneSided) {
     const safeStack = Array.isArray(stack) ? stack : [];
-    if (safeStack.length === 0) return `${bar} kg bar only`;
+    const safeBar = Number(bar);
+    if (safeStack.length === 0) {
+      return safeBar === 0 ? 'No plates; 0 kg total' : `${safeBar} kg bar only`;
+    }
     const orderedPlates = safeStack
       .map((plateIdx) => `${plates[plateIdx].label} kg`)
       .join(', ');
+    const base = safeBar === 0 ? 'No bar weight' : `${safeBar} kg bar`;
     const scope = oneSided ? 'loaded side' : 'each side';
-    return `${bar} kg bar; ${scope}, from collar outward: ${orderedPlates}`;
+    return `${base}; ${scope}, from collar outward: ${orderedPlates}`;
   }
 
   function generateWarmup(targetKg, options = {}) {
-    const bar = Number.isFinite(options.bar) && options.bar >= 0 ? options.bar : 20;
+    const bar = normaliseBar(options.bar);
     const sided = options.sided === 1 ? 1 : 2;
-    const increment = totalIncrement(options.plates, sided);
-    const minimum = bar > 0 ? bar : increment;
     const percentages = Array.isArray(options.percentages)
       ? options.percentages
       : [0.50, 0.70, 0.85, 0.95, 1.00];
+    const target = Number(targetKg);
+    if (!Number.isFinite(target) || target <= 0 || target < bar) return [];
+
+    // Callers without stock information mean unlimited stock, not merely the
+    // denomination GCD. Derive finite caps from the requested target and reuse
+    // the exact bounded-reachability path so low, non-representable lattice
+    // points are never emitted.
+    if (!Array.isArray(options.maxima)) {
+      const exactTargetUnits = (target - bar) * 4 / sided;
+      const targetUnits = Math.round(exactTargetUnits);
+      if (Math.abs(exactTargetUnits - targetUnits) > 1e-6) return [];
+      const unlimitedMaxima = (Array.isArray(options.plates) ? options.plates : [])
+        .map(quarterUnits)
+        .map((unit) => unit > 0 ? Math.floor(targetUnits / unit) : 0);
+      return generateWarmup(target, {
+        ...options,
+        maxima: unlimitedMaxima,
+        percentages,
+      });
+    }
+
+    const profile = reachableProfile(options.plates, options.maxima);
+    const exactTargetUnits = (target - bar) * 4 / sided;
+    const targetUnits = Math.round(exactTargetUnits);
+    if (
+      Math.abs(exactTargetUnits - targetUnits) > 1e-6 ||
+      targetUnits > profile.maximum ||
+      !profile.reachable[targetUnits]
+    ) return [];
+
+    const nearestReachable = (desiredUnits) => {
+      const rounded = Math.max(0, Math.min(targetUnits, Math.round(desiredUnits)));
+      for (let distance = 0; distance <= targetUnits; distance++) {
+        const lower = rounded - distance;
+        if (lower >= 0 && profile.reachable[lower]) return lower;
+        const upper = rounded + distance;
+        if (upper <= targetUnits && profile.reachable[upper]) return upper;
+      }
+      return 0;
+    };
+
     const seen = new Set();
     const weights = [];
-
-    for (const percentage of percentages) {
-      let weight = Math.round((targetKg * percentage) / increment) * increment;
-      weight = Number(weight.toFixed(6));
-      if (weight < minimum) weight = minimum;
+    for (const rawPercentage of percentages) {
+      const percentage = Number(rawPercentage);
+      if (!Number.isFinite(percentage)) continue;
+      const desired = (target * percentage - bar) * 4 / sided;
+      const perSideUnits = nearestReachable(desired);
+      const weight = Number((bar + perSideUnits * sided / 4).toFixed(6));
       if (!seen.has(weight)) {
         seen.add(weight);
         weights.push(weight);
@@ -104,7 +234,7 @@ function buildStateLib() {
     const raw = String(hash || '').replace(/^#/, '');
     if (!raw) return null;
 
-    const out = {};
+    const out = Object.create(null);
     for (const pair of raw.split('&')) {
       const eq = pair.indexOf('=');
       if (eq < 0) continue;
@@ -166,6 +296,9 @@ function buildStateLib() {
     clampInteger,
     describeBar,
     generateWarmup,
+    isAchievableTotal,
+    maxTotalWeight,
+    minTotalWeight,
     parseWeightInput,
     parseHash,
     stateFromHash,

@@ -1,5 +1,4 @@
-// Plate Loader service worker — offline app-shell cache.
-// Known shell assets use stale-while-revalidate; unrelated requests pass through.
+// Plate Loader service worker — immutable, versioned offline app-shell cache.
 
 const BUILD_ID = '__PLATELOADER_BUILD_ID__';
 const APP_SCOPE = self.registration.scope;
@@ -8,18 +7,11 @@ const INDEX_URL = appUrl('index.html');
 const SCOPE_PATH = new URL(APP_SCOPE).pathname;
 const INDEX_PATH = new URL(INDEX_URL).pathname;
 
-function shortHash(value) {
-  let hash = 2166136261;
-  for (let index = 0; index < value.length; index++) {
-    hash ^= value.charCodeAt(index);
-    hash = Math.imul(hash, 16777619);
-  }
-  return (hash >>> 0).toString(36);
-}
-
-const CACHE_PREFIX = `plateloader-${shortHash(APP_SCOPE)}-`;
+// Cache names are strings, so using the complete registration scope is both
+// simpler and collision-free. Only generations belonging to this exact scope
+// are ever removed during activation.
+const CACHE_PREFIX = `plateloader:${APP_SCOPE}:`;
 const CACHE_VERSION = `${CACHE_PREFIX}${BUILD_ID}`;
-const LEGACY_CACHE = /^plateloader-v\d+$/;
 const APP_SHELL = [
   'index.html',
   'plateloader.css',
@@ -57,7 +49,7 @@ function cacheKeyFor(request) {
 
 self.addEventListener('install', (event) => {
   // Stay waiting until the page's Reload action explicitly asks this worker
-  // to activate. A fresh cache is populated without consulting HTTP cache.
+  // to activate. Populate a fresh generation without consulting HTTP cache.
   event.waitUntil(
     caches.open(CACHE_VERSION)
       .then((cache) => cache.addAll(
@@ -71,10 +63,7 @@ self.addEventListener('activate', (event) => {
     caches.keys()
       .then((names) => Promise.all(
         names
-          .filter((name) => (
-            name !== CACHE_VERSION &&
-            (name.startsWith(CACHE_PREFIX) || LEGACY_CACHE.test(name))
-          ))
+          .filter((name) => name.startsWith(CACHE_PREFIX) && name !== CACHE_VERSION)
           .map((name) => caches.delete(name)),
       ))
       .then(() => self.clients.claim()),
@@ -87,6 +76,21 @@ self.addEventListener('message', (event) => {
   }
 });
 
+async function cachedShellResponse(cacheKey, isNavigation) {
+  const cache = await caches.open(CACHE_VERSION);
+  const cached = await cache.match(cacheKey);
+  if (cached) return cached;
+
+  try {
+    const response = await fetch(new Request(cacheKey, { cache: 'reload' }));
+    if (response && response.ok) await cache.put(cacheKey, response.clone());
+    return response || Response.error();
+  } catch (_) {
+    if (!isNavigation) return Response.error();
+    return await cache.match(INDEX_URL) || Response.error();
+  }
+}
+
 self.addEventListener('fetch', (event) => {
   const request = event.request;
   if (request.method !== 'GET') return;
@@ -94,29 +98,6 @@ self.addEventListener('fetch', (event) => {
   const cacheKey = cacheKeyFor(request);
   if (!cacheKey) return;
 
-  const cachePromise = caches.open(CACHE_VERSION);
-  const cachedPromise = cachePromise
-    .then((cache) => cache.match(cacheKey))
-    .catch(() => null);
-  const networkPromise = fetch(cacheKey, { cache: 'no-cache' });
-  const refreshPromise = networkPromise
-    .then((response) => {
-      if (!response || !response.ok) return;
-      return cachePromise.then((cache) => cache.put(cacheKey, response.clone()));
-    })
-    .catch(() => {});
-
-  event.waitUntil(refreshPromise);
-  event.respondWith(
-    cachedPromise
-      .then((cached) => cached || networkPromise)
-      .catch(() => {
-        if (request.mode !== 'navigate' && request.destination !== 'document') {
-          return Response.error();
-        }
-        return cachePromise
-          .then((cache) => cache.match(INDEX_URL))
-          .then((fallback) => fallback || Response.error());
-      }),
-  );
+  const isNavigation = request.mode === 'navigate' || request.destination === 'document';
+  event.respondWith(cachedShellResponse(cacheKey, isNavigation));
 });

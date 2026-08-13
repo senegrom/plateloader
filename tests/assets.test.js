@@ -23,7 +23,7 @@ function fileTreeHashes(directory) {
   const output = new Map();
   const visit = (current, relativeRoot = '') => {
     for (const entry of fs.readdirSync(current, { withFileTypes: true })
-      .sort((left, right) => left.name.localeCompare(right.name))) {
+      .sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0)) {
       const relative = path.join(relativeRoot, entry.name);
       const absolute = path.join(current, entry.name);
       if (entry.isDirectory()) visit(absolute, relative);
@@ -38,7 +38,7 @@ function listFiles(directory, relativeRoot = directory) {
   const files = [];
   const visit = (current, relative) => {
     for (const entry of fs.readdirSync(current, { withFileTypes: true })
-      .sort((left, right) => left.name.localeCompare(right.name))) {
+      .sort((left, right) => left.name < right.name ? -1 : left.name > right.name ? 1 : 0)) {
       const absolute = path.join(current, entry.name);
       const childRelative = path.join(relative, entry.name);
       if (entry.isDirectory()) visit(absolute, childRelative);
@@ -56,9 +56,9 @@ function expectedBuildId() {
     ...textAssets,
     ...listFiles('fonts'),
     ...listFiles('icons'),
-  ].sort();
+  ].sort((left, right) => left < right ? -1 : left > right ? 1 : 0);
   for (const file of files) {
-    hash.update(file);
+    hash.update(file.split(path.sep).join('/'));
     hash.update('\0');
     hash.update(fs.readFileSync(path.join(root, file)));
     hash.update('\0');
@@ -82,6 +82,7 @@ test('HTML copy, optimisation semantics and accessibility match the application 
   assert.match(html, /Valid sets are globally optimised[^<]*invalid entries are skipped/);
   assert.match(html, /<link rel="canonical" href="https:\/\/senegrom\.github\.io\/plateloader\/"\/>/);
   assert.match(html, /<meta property="og:url" content="https:\/\/senegrom\.github\.io\/plateloader\/"\/>/);
+  assert.match(html, /<meta name="twitter:card" content="summary"\/>/);
 
   const summary = html.match(/<summary>[\s\S]*?<\/summary>/)?.[0];
   assert.ok(summary, 'starting-stack summary missing');
@@ -100,30 +101,51 @@ test('CSS retains required behavior, safe areas and no unused text-input selecto
   assert.doesNotMatch(css, /input\[type=text\]/);
   assert.match(css, /env\(safe-area-inset-top\)/);
   assert.match(css, /env\(safe-area-inset-bottom\)/);
+  assert.match(css, /color-scheme:\s*dark/);
 });
 
-test('UI source covers skipped invalid rows, singular moves and warm-up validation', () => {
+test('UI source covers lifecycle persistence, compact worker state and stock-aware warm-ups', () => {
   const app = read('plateloader.js');
+  const worker = read('algo-worker.js');
   assert.match(app, /surrounding valid sets remain globally optimised together/);
   assert.match(app, /const moveLabel = \(n\) => `\$\{n\} move/);
-  assert.match(app, /startTotalEl\.textContent = `\$\{fmtKg\(BAR\)\} kg bar only`/);
-  assert.match(app, /stateLib\.totalIncrement\(PLATES, sided\(\)\)/);
+  assert.match(app, /BAR === 0 \? 'No plates · 0 kg'/);
+  assert.match(app, /const emptyLoadLabel = \(\) => BAR === 0 \? 'no plates' : 'bar only'/);
+  assert.match(app, /stateLib\.minTotalWeight/);
+  assert.match(app, /stateLib\.maxTotalWeight/);
+  assert.match(app, /effectivePlateMax/);
+  assert.match(app, /updateWarmupConstraints\(\);[\s\S]*return changed/);
+  assert.match(app, /window\.addEventListener\('pagehide', flushPersistence\)/);
+  assert.match(app, /const schedulePersist = \(\) =>/);
+  assert.match(app, /let inflightReqId = null/);
+  assert.doesNotMatch(app, /inflightReqs|indicatorTimers/);
+  assert.match(app, /document\.createDocumentFragment\(\)/);
+  assert.match(app, /out\.replaceChildren\(fragment\)/);
   assert.match(app, /warmupTarget\.reportValidity\(\)/);
-  assert.match(app, /kg < minimum/);
-  assert.match(app, /let pendingCleanup = null/);
+  assert.match(app, /maxTotalWeight\([\s\S]*MAX_TOTAL_KG/);
+  assert.ok(app.includes('<span role="status">New version available.</span>'));
+  assert.doesNotMatch(app, /toast\.setAttribute\('role', 'status'\)/);
   assert.match(app, /one final unload after every user row/);
-  assert.doesNotMatch(app, /removedIdx|addedIdx|r\.counts/);
+  assert.doesNotMatch(app, /removedIdx|addedIdx|r\.counts|r\.isStart/);
+  assert.doesNotMatch(worker, /hasStart/);
 });
 
-test('the optimiser shares feasibility data and uses compact numeric memo state', () => {
+test('the optimiser uses collision-free compact state and exact branch pruning', () => {
   const algorithm = read('algo.js');
   assert.match(algorithm, /const feasibilityCache = new Map\(\)/);
-  assert.match(algorithm, /const packMemoKey =/);
-  assert.match(algorithm, /prefixKey \* PREFIX_BASE/);
-  assert.doesNotMatch(algorithm, /memoChoices|const fKey|combos:/);
-  assert.doesNotMatch(algorithm, /\+\s*'\|'/);
-  assert.match(algorithm, /removedCount/);
-  assert.doesNotMatch(algorithm, /removedIdx|addedIdx|perSideMoves:|isEnd/);
+  assert.match(algorithm, /const multipliers = new Array\(NP\)/);
+  assert.match(algorithm, /function createMembership\(\)/);
+  assert.match(algorithm, /new Uint32Array/);
+  assert.match(algorithm, /const suffixMaximumUnits/);
+  assert.match(algorithm, /const suffixDenominationGcd/);
+  assert.match(algorithm, /const packMemoKey = numericMemoKeys/);
+  assert.match(algorithm, /prefixKey \+ multipliers\[plateIndex\]/);
+  assert.match(algorithm, /maximumTargetUnits/);
+  assert.match(algorithm, /Compute the downward closure once/);
+  assert.match(algorithm, /function evaluate\(start, end, prefixKey, prefixUnits, recordChoices\)/);
+  assert.doesNotMatch(algorithm, /memoChoices|const fKey|combos:|comboKeys/);
+  assert.doesNotMatch(algorithm, /c\[0\]<<24|four-bit-per-count limit/);
+  assert.doesNotMatch(algorithm, /removedIdx|addedIdx|perSideMoves:|isEnd|isStart:/);
 });
 
 test('the builder removes the CodeQL finding and produces deterministic source-faithful output', () => {
@@ -132,11 +154,16 @@ test('the builder removes the CodeQL finding and produces deterministic source-f
   assert.doesNotMatch(builder, /<!--\(\?!|\[\\s\\S\]\*\?/);
   assert.match(builder, /BUILD_PLACEHOLDER/);
   assert.match(builder, /renameSync\(temporaryOutput, output\)/);
+  assert.match(builder, /_site\.lock/);
+  assert.match(builder, /recoverInterruptedBuild/);
 
   const staleTemp = path.join(root, '_site.tmp-stale-test');
   const staleOld = path.join(root, '_site.old-stale-test');
   fs.mkdirSync(staleTemp, { recursive: true });
   fs.mkdirSync(staleOld, { recursive: true });
+  const staleDate = new Date(Date.now() - 25 * 60 * 60 * 1000);
+  fs.utimesSync(staleTemp, staleDate, staleDate);
+  fs.utimesSync(staleOld, staleDate, staleDate);
 
   let result = runBuild();
   assert.equal(result.status, 0, result.stderr || result.stdout);
@@ -177,11 +204,49 @@ test('the builder refuses custom output paths and symlinked _site targets', () =
       fs.symlinkSync(root, site, 'dir');
       const linked = runBuild();
       assert.notEqual(linked.status, 0);
-      assert.match(linked.stderr, /symlinked build output/);
+      assert.match(linked.stderr, /invalid build output/);
     } finally {
       fs.rmSync(site, { force: true });
       if (fs.existsSync(backup)) fs.renameSync(backup, site);
     }
+  }
+});
+
+test('the builder serializes writers and restores an interrupted backup before validation', () => {
+  const lock = path.join(root, '_site.lock');
+  fs.rmSync(lock, { recursive: true, force: true });
+  fs.mkdirSync(lock);
+  let result = runBuild();
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /Another build appears to be running/);
+  fs.rmSync(lock, { recursive: true, force: true });
+
+  fs.mkdirSync(lock);
+  const staleLockDate = new Date(Date.now() - 2 * 60 * 60 * 1000);
+  fs.utimesSync(lock, staleLockDate, staleLockDate);
+  result = runBuild();
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.equal(fs.existsSync(lock), false);
+
+  const site = path.join(root, '_site');
+  const interruptedBackup = path.join(root, '_site.old-recovery-test');
+  const manifest = path.join(root, 'manifest.json');
+  const heldManifest = path.join(root, 'manifest.json.recovery-test');
+  fs.rmSync(interruptedBackup, { recursive: true, force: true });
+  fs.rmSync(heldManifest, { force: true });
+  const before = fileTreeHashes(site);
+  fs.renameSync(site, interruptedBackup);
+  fs.renameSync(manifest, heldManifest);
+  try {
+    result = runBuild();
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /Invalid build source file/);
+    assert.equal(fs.existsSync(site), true, 'last good site should be restored');
+    assert.deepEqual(fileTreeHashes(site), before);
+  } finally {
+    if (fs.existsSync(heldManifest)) fs.renameSync(heldManifest, manifest);
+    fs.rmSync(interruptedBackup, { recursive: true, force: true });
+    fs.rmSync(lock, { recursive: true, force: true });
   }
 });
 
@@ -228,10 +293,14 @@ test('CI builds once, deploys the tested artifact and keeps the deploy job lean'
 test('package metadata and documentation describe the exact optimiser', () => {
   const packageJson = JSON.parse(read('package.json'));
   const readme = read('README.md');
-  assert.equal(packageJson.version, '1.2.0');
+  assert.equal(packageJson.version, '1.3.0');
   assert.match(readme, /Invalid entries remain visible but are skipped as physical states/);
   assert.match(readme, /does not use a heuristic or complexity guard/);
   assert.match(readme, /Σ√kg moved/);
+  assert.match(readme, /collision-free mixed-radix state encoding/);
+  assert.match(readme, /crash-recoverable/);
+  assert.match(readme, /immutable and isolated/);
+  assert.equal(JSON.parse(read('manifest.json')).id, './');
 });
 
 test('all source and built JavaScript parses under Node', () => {

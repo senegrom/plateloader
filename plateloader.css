@@ -13,6 +13,7 @@
                src: url('fonts/JetBrainsMono-700.woff2') format('woff2'); }
 
   :root {
+    color-scheme: dark;
     --bg: #0e0f12;
     --panel: #16181d;
     --panel-2: #1c1f26;
