@@ -38,7 +38,7 @@ jobs:
 
           # Two staged base64 letters were lower-cased in transit. Restore the
           # known payload bytes, then require the complete archive checksum.
-          encoded[6 * 4000 + 794] = ord('N')
+          encoded[6 * 4000 + 801] = ord('N')
           encoded[9 * 4000 + 3499] = ord('I')
           decoded = base64.b64decode(encoded, validate=True)
           actual = hashlib.sha256(decoded).hexdigest()
