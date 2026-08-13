@@ -126,24 +126,32 @@ function candidatesForWeight(total, plateMax, monotonic, sided) {
 // removes impossible entries and optimises every remaining valid set together.
 function oracleObjective(weights, mode, plateMax, startStack, monotonic, sided) {
   const effectiveMax = plateMax.slice();
-  const candidateSets = [];
+  let pinned = null;
 
   if (startStack && startStack.length) {
-    const pinned = monotonic ? startStack.slice().sort((a, b) => a - b) : startStack.slice();
+    pinned = startStack.slice();
+    if (monotonic) {
+      for (let index = 1; index < pinned.length; index++) {
+        if (pinned[index] < pinned[index - 1]) {
+          throw new RangeError('Monotonic starting stack must be ordered heaviest to lightest');
+        }
+      }
+    }
     const startCounts = new Array(PLATES.length).fill(0);
     for (const plateIdx of pinned) startCounts[plateIdx]++;
     for (let plateIdx = 0; plateIdx < effectiveMax.length; plateIdx++) {
       effectiveMax[plateIdx] = Math.max(effectiveMax[plateIdx], startCounts[plateIdx]);
     }
-    candidateSets.push([pinned]);
   }
 
+  const userCandidateSets = [];
   for (const weight of weights) {
     const candidates = candidatesForWeight(weight, effectiveMax, monotonic, sided);
-    if (candidates.length > 0) candidateSets.push(candidates);
+    if (candidates.length > 0) userCandidateSets.push(candidates);
   }
 
-  if (candidateSets.length === 0) return [0, 0];
+  if (userCandidateSets.length === 0) return [0, 0];
+  const candidateSets = pinned ? [[pinned], ...userCandidateSets] : userCandidateSets;
 
   let states = new Map([['', { stack: [], cost: [0, 0] }]]);
   for (const candidates of candidateSets) {
@@ -223,7 +231,7 @@ test('selected two-sided, one-sided, monotonic and pinned-start cases match an e
     { weights: [30, 40, 50], monotonic: true },
     { weights: [40, 45, 50], startStack: [3, 4] },
     { weights: [40, 45, 50], startStack: [4, 3] },
-    { weights: [35, 45], startStack: [4, 3], monotonic: true },
+    { weights: [35, 45], startStack: [3, 4], monotonic: true },
     { weights: [60, 61, 80], stock: 2 },
     { weights: [61, 60, 80, 61], stock: 2 },
   ];
@@ -245,11 +253,15 @@ test('deterministic random small-domain cases match the exhaustive oracle', () =
     const source = sided === 1 ? oneSidedWeights : twoSidedWeights;
     const length = 1 + Math.floor(random() * 5);
     const weights = Array.from({ length }, () => source[Math.floor(random() * source.length)]);
+    const monotonic = random() < 0.4;
+    const eligibleStartStacks = monotonic
+      ? [null, [1], [3, 4], [5, 6]]
+      : startStacks;
     checkAgainstOracle({
       weights,
       stock: random() < 0.25 ? 2 : 1,
-      startStack: startStacks[Math.floor(random() * startStacks.length)],
-      monotonic: random() < 0.4,
+      startStack: eligibleStartStacks[Math.floor(random() * eligibleStartStacks.length)],
+      monotonic,
       sided,
     });
   }
@@ -266,6 +278,20 @@ test('invalid entries stay visible but do not force an unload boundary', () => {
   assert.deepEqual(resultObjective(bridged, 'count'), [8, 120]);
   assert.equal(bridged[0].cleanup, undefined);
   assert.ok(bridged[2].cleanup);
+});
+
+test('a pinned start is omitted when every requested set is invalid', () => {
+  const plateMax = PLATES.map(() => 2);
+  const results = algo.optimize([61], 'count', plateMax, PLATES, BAR, [1], false, 2);
+
+  assert.equal(results.length, 1);
+  assert.equal(results[0].valid, false);
+  assert.equal(results[0].total, 61);
+  assert.equal(results.some((result) => result.cleanup), false);
+  assert.deepEqual(
+    algo.optimize([], 'count', plateMax, PLATES, BAR, [1], false, 2),
+    [],
+  );
 });
 
 test('denomination failures are distinct from selected-stock failures', () => {
@@ -326,6 +352,15 @@ test('monotonic direct-API inputs must be ordered heaviest to lightest', () => {
     () => algo.optimize([25], 'count', [2, 2], [1.25, 2.5], 20, null, true, 2),
     /ordered heaviest to lightest/,
   );
+});
+
+test('monotonic starting stacks are validated without being reordered', () => {
+  const start = [4, 3];
+  assert.throws(
+    () => algo.optimize([40], 'count', PLATES.map(() => 2), PLATES, BAR, start, true, 2),
+    /starting stack must be ordered heaviest to lightest/,
+  );
+  assert.deepEqual(start, [4, 3]);
 });
 
 test('inventory irrelevant to every valid target is removed without changing exactness', () => {

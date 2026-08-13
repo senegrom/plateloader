@@ -76,6 +76,15 @@ function buildStateLib() {
     return Number.isFinite(value) && value >= 0 ? value : 20;
   }
 
+  function isMonotonicStack(stack) {
+    if (!Array.isArray(stack)) return true;
+    for (let index = 0; index < stack.length; index++) {
+      if (!Number.isInteger(stack[index]) || stack[index] < 0) return false;
+      if (index > 0 && stack[index] < stack[index - 1]) return false;
+    }
+    return true;
+  }
+
   function minTotalWeight(plates, maxima, bar = 20, sided = 2) {
     const safeBar = normaliseBar(bar);
     if (safeBar > 0) return safeBar;
@@ -173,15 +182,16 @@ function buildStateLib() {
       !profile.reachable[targetUnits]
     ) return [];
 
-    const nearestReachable = (desiredUnits) => {
-      const rounded = Math.max(0, Math.min(targetUnits, Math.round(desiredUnits)));
-      for (let distance = 0; distance <= targetUnits; distance++) {
-        const lower = rounded - distance;
-        if (lower >= 0 && profile.reachable[lower]) return lower;
-        const upper = rounded + distance;
-        if (upper <= targetUnits && profile.reachable[upper]) return upper;
+    const minimumUnits = bar === 0
+      ? profile.reachable.findIndex((reachable, units) => units > 0 && reachable)
+      : 0;
+    const reachableAtOrBelow = (desiredUnits) => {
+      if (minimumUnits < 0) return null;
+      const upper = Math.min(targetUnits, Math.floor(desiredUnits + 1e-9));
+      for (let units = upper; units >= minimumUnits; units--) {
+        if (profile.reachable[units]) return units;
       }
-      return 0;
+      return null;
     };
 
     const seen = new Set();
@@ -190,7 +200,8 @@ function buildStateLib() {
       const percentage = Number(rawPercentage);
       if (!Number.isFinite(percentage)) continue;
       const desired = (target * percentage - bar) * 4 / sided;
-      const perSideUnits = nearestReachable(desired);
+      const perSideUnits = reachableAtOrBelow(desired);
+      if (perSideUnits === null) continue;
       const weight = Number((bar + perSideUnits * sided / 4).toFixed(6));
       if (!seen.has(weight)) {
         seen.add(weight);
@@ -297,6 +308,7 @@ function buildStateLib() {
     describeBar,
     generateWarmup,
     isAchievableTotal,
+    isMonotonicStack,
     maxTotalWeight,
     minTotalWeight,
     parseWeightInput,

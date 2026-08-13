@@ -22,7 +22,9 @@ Plate-count vectors use collision-free mixed-radix state encoding. Dense state s
 
 The starting stack may exceed the selected stock count because those plates are already physically present. Its UI length is bounded to reject implausible crafted URL or local-storage state, not to approximate the optimiser.
 
-Warm-up targets and percentages are projected only onto weights that can actually be loaded with the selected bar, sidedness, stock and starting inventory.
+Warm-up targets must be exactly loadable with the selected bar, sidedness, stock and starting inventory. Intermediate sets are projected downward to the nearest loadable weight at or below each intended percentage, so a warm-up never exceeds its stated stage.
+
+Monotonic mode preserves the declared physical starting-stack order. An incompatible stack is rejected rather than silently rearranged.
 
 ## Development
 
@@ -31,6 +33,6 @@ npm test
 npm run build
 ```
 
-The build is deterministic, single-writer, crash-recoverable and atomic. It writes `_site`, copies source assets without ad-hoc HTML/CSS/JavaScript rewriting, injects a content-derived service-worker build ID, and leaves all source files readable. App-shell cache generations are immutable and isolated by the exact service-worker registration scope.
+The build is deterministic, single-writer, crash-recoverable and atomic. It writes `_site`, copies source assets without ad-hoc HTML/CSS/JavaScript rewriting, injects a content-derived service-worker build ID, and leaves all source files readable. App-shell cache generations are immutable and isolated by the exact service-worker registration scope. Runtime cache failures degrade to network loading instead of discarding a successful response.
 
 URL state is updated immediately while local storage is coalesced during typing and flushed when the page hides, so rapid reloads retain the latest input.

@@ -75,13 +75,14 @@
     </div>
 
     <label class="constraint-toggle">
-      <input type="checkbox" id="monotonicToggle" />
+      <input type="checkbox" id="monotonicToggle" aria-describedby="constraintNotice" />
       <span>Monotonic stack — heaviest plates always innermost</span>
     </label>
     <label class="constraint-toggle">
       <input type="checkbox" id="oneSidedToggle" />
       <span>One-sided — load plates on one side only</span>
     </label>
+    <div id="constraintNotice" class="hint constraint-notice" role="status" aria-live="polite" hidden></div>
 
     <h2 id="lbl-mode">Optimisation mode</h2>
     <div class="modes" id="modes" role="radiogroup" aria-labelledby="lbl-mode">
@@ -129,7 +130,7 @@
     <h2 id="lbl-warmup">Generate warmup</h2>
     <label for="warmupTarget" class="warmup-label">Target weight (kg)</label>
     <input type="number" id="warmupTarget" min="20" max="1000" step="any" value="140" required inputmode="decimal" aria-describedby="warmupNote" />
-    <div class="warmup-note" id="warmupNote">Will create loadable sets at 50%, 70%, 85%, 95% and 100%.</div>
+    <div class="warmup-note" id="warmupNote">Will create loadable sets at or below 50%, 70%, 85% and 95%, plus the exact 100% target.</div>
     <div class="actions">
       <button type="button" class="btn secondary" id="warmupCancel">Cancel</button>
       <button type="submit" class="btn">Generate</button>

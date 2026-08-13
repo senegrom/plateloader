@@ -104,6 +104,7 @@ function acquireBuildLock() {
     fs.mkdirSync(lockDirectory);
     try {
       fs.writeFileSync(path.join(lockDirectory, 'owner.json'), JSON.stringify({
+        runId,
         pid: process.pid,
         startedAt: new Date().toISOString(),
       }));
@@ -133,6 +134,14 @@ function acquireBuildLock() {
 }
 
 function releaseBuildLock() {
+  try {
+    const owner = JSON.parse(
+      fs.readFileSync(path.join(lockDirectory, 'owner.json'), 'utf8'),
+    );
+    if (!owner || owner.runId !== runId) return;
+  } catch (_) {
+    return;
+  }
   removeBuildPath(lockDirectory);
 }
 
