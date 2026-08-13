@@ -91,7 +91,7 @@ test('integer clamping never uses signed 32-bit coercion', () => {
   assert.equal(state.clampInteger('not-a-number', 0, 6, 2), 2);
 });
 
-test('bar descriptions preserve plate order from the collar outward', () => {
+test('bar descriptions preserve plate order and describe a zero-weight bar honestly', () => {
   assert.equal(
     state.describeBar([1, 4, 1], plates, 20, false),
     '20 kg bar; each side, from collar outward: 20 kg, 5 kg, 20 kg',
@@ -102,16 +102,18 @@ test('bar descriptions preserve plate order from the collar outward', () => {
   );
   assert.equal(
     state.describeBar([6], plates, 0, true),
-    '0 kg bar; loaded side, from collar outward: 1.25 kg',
+    'No bar weight; loaded side, from collar outward: 1.25 kg',
   );
   assert.equal(state.describeBar([], plates, 20, false), '20 kg bar only');
+  assert.equal(state.describeBar([], plates, 0, false), 'No plates; 0 kg total');
 });
 
-test('the achievable total increment is derived from plate denominations', () => {
+test('the achievable total increment is derived from valid plate denominations', () => {
   assert.equal(state.totalIncrement(plates, 2), 2.5);
   assert.equal(state.totalIncrement(plates, 1), 1.25);
   assert.equal(state.totalIncrement([{ kg: 5 }, { kg: 2.5 }], 2), 5);
   assert.equal(state.totalIncrement([{ kg: 5 }, { kg: 2.5 }], 1), 2.5);
+  assert.equal(state.totalIncrement([{ kg: 1.3 }, { kg: 2.5 }], 2), 5);
 });
 
 test('warm-ups use the derived increment for the selected sidedness', () => {
@@ -120,17 +122,56 @@ test('warm-ups use the derived increment for the selected sidedness', () => {
     [50, 70, 85, 95, 100],
   );
   assert.deepEqual(
-    state.generateWarmup(42, { bar: 20, sided: 1, plates }),
+    state.generateWarmup(42.5, { bar: 20, sided: 1, plates }),
     [21.25, 30, 36.25, 40, 42.5],
   );
 });
 
+test('stock-aware warm-ups use only loadable weights and respect true bounds', () => {
+  const stockTwo = plates.map(() => 2);
+  assert.equal(state.minTotalWeight(plates, stockTwo, 20, 2), 20);
+  assert.equal(state.maxTotalWeight(plates, stockTwo, 20, 2), 335);
+  assert.equal(state.maxTotalWeight([{ kg: 25 }], [100], 20, 2, 1000), 970);
+  assert.equal(state.isAchievableTotal(100, { bar: 20, sided: 2, plates, maxima: stockTwo }), true);
+  assert.equal(state.isAchievableTotal(101, { bar: 20, sided: 2, plates, maxima: stockTwo }), false);
+  assert.deepEqual(
+    state.generateWarmup(100, { bar: 20, sided: 2, plates, maxima: stockTwo }),
+    [50, 70, 85, 95, 100],
+  );
+
+  const onlyTwentyFive = [1, 0, 0, 0, 0, 0, 0];
+  assert.equal(state.minTotalWeight(plates, onlyTwentyFive, 0, 2), 50);
+  assert.equal(state.maxTotalWeight(plates, onlyTwentyFive, 20, 2), 70);
+  assert.equal(state.isAchievableTotal(70, {
+    bar: 20, sided: 2, plates, maxima: onlyTwentyFive,
+  }), true);
+  assert.equal(state.isAchievableTotal(45, {
+    bar: 20, sided: 2, plates, maxima: onlyTwentyFive,
+  }), false);
+  assert.deepEqual(
+    state.generateWarmup(70, {
+      bar: 20, sided: 2, plates, maxima: onlyTwentyFive,
+    }),
+    [20, 70],
+  );
+});
+
+test('invalid warm-up targets return no generated sets', () => {
+  assert.deepEqual(state.generateWarmup(NaN, { bar: 20, sided: 2, plates }), []);
+  assert.deepEqual(state.generateWarmup(-10, { bar: 20, sided: 2, plates }), []);
+  assert.deepEqual(state.generateWarmup(10, { bar: 20, sided: 2, plates }), []);
+  assert.deepEqual(state.generateWarmup(42, { bar: 20, sided: 1, plates }), []);
+});
+
 test('zero-bar warm-ups never generate a zero-weight set', () => {
-  assert.deepEqual(state.generateWarmup(1, { bar: 0, sided: 2, plates }), [2.5]);
-  assert.deepEqual(state.generateWarmup(1, { bar: 0, sided: 1, plates }), [1.25]);
+  assert.deepEqual(state.generateWarmup(1, { bar: 0, sided: 2, plates }), []);
+  assert.deepEqual(state.generateWarmup(2.5, { bar: 0, sided: 2, plates }), [2.5]);
+  assert.deepEqual(state.generateWarmup(1.25, { bar: 0, sided: 1, plates }), [1.25]);
+  assert.equal(state.minTotalWeight(plates, plates.map(() => 0), 0, 2), Infinity);
 });
 
 test('invalid anchors and malformed encoded values are ignored safely', () => {
+  assert.equal(Object.getPrototypeOf(state.parseHash('#w=100')), null);
   assert.equal(state.stateFromHash('#summary', defaults), null);
   assert.equal(state.stateFromHash('#other=value', defaults), null);
   assert.equal(state.stateFromHash('#w=%E0%A4%A', defaults), null);

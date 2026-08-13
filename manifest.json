@@ -2,6 +2,7 @@
   "name": "Plate Loader — Deadlift sets",
   "short_name": "Plate Loader",
   "description": "Optimal plate arrangement for a sequence of deadlift sets — minimises plate moves between sets.",
+  "id": "./",
   "start_url": "./",
   "scope": "./",
   "display": "standalone",

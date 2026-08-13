@@ -1,3 +1,4 @@
 _site.old-*
 _site.tmp-*/
 _site/
+_site.lock/

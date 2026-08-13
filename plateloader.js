@@ -13,6 +13,7 @@ const PLATES = [
   { kg: 1.25, cls: 'w-1_25', label: '1.25' },
 ];
 const PLATE_KG = PLATES.map((plate) => plate.kg);
+const DARK_PLATE_KG = new Set([25, 20, 10, 2.5, 1.25]);
 const DEFAULT_BAR = 20;
 let BAR = DEFAULT_BAR;
 let plateMax = PLATES.map(() => 2);
@@ -29,14 +30,16 @@ let algoWorker = null;
 let workerInitTried = false;
 let workerEverSucceeded = false;
 let currentReqId = 0;
-const inflightReqs = new Set();
-const indicatorTimers = new Map();      // reqId → timeoutId
+let inflightReqId = null;
+let indicatorTimer = null;
+let indicatorReqId = null;
 const INDICATOR_DELAY_MS = 150;
 
-function clearIndicator(reqId) {
-  if (!indicatorTimers.has(reqId)) return;
-  clearTimeout(indicatorTimers.get(reqId));
-  indicatorTimers.delete(reqId);
+function clearIndicator(reqId = null) {
+  if (indicatorTimer === null || (reqId !== null && reqId !== indicatorReqId)) return;
+  clearTimeout(indicatorTimer);
+  indicatorTimer = null;
+  indicatorReqId = null;
 }
 
 function disposeAlgoWorker(allowRetry) {
@@ -47,8 +50,8 @@ function disposeAlgoWorker(allowRetry) {
   }
   algoWorker = null;
   workerInitTried = !allowRetry;
-  for (const reqId of inflightReqs) clearIndicator(reqId);
-  inflightReqs.clear();
+  clearIndicator();
+  inflightReqId = null;
 }
 
 function ensureAlgoWorker() {
@@ -59,8 +62,8 @@ function ensureAlgoWorker() {
   try {
     const worker = new Worker('algo-worker.js');
     worker.onmessage = (event) => {
-      const { reqId, results, error, hasStart } = event.data;
-      inflightReqs.delete(reqId);
+      const { reqId, results, error } = event.data;
+      if (inflightReqId === reqId) inflightReqId = null;
       clearIndicator(reqId);
       if (reqId !== currentReqId) return;
       if (error) {
@@ -70,7 +73,7 @@ function ensureAlgoWorker() {
         return;
       }
       workerEverSucceeded = true;
-      renderResults(results, hasStart);
+      renderResults(results, startStack !== null);
     };
     worker.onerror = (event) => {
       // Quiet on first failure (usually a worker-policy restriction); log if
@@ -82,7 +85,7 @@ function ensureAlgoWorker() {
           lineno: event.lineno,
         });
       }
-      const hadInflight = inflightReqs.size > 0;
+      const hadInflight = inflightReqId !== null;
       disposeAlgoWorker(false);
       if (hadInflight) compute(true);
     };
@@ -134,7 +137,7 @@ function clearInputErrorState() {
 
 function renderPlate(plateIdx, opts) {
   const p = PLATES[plateIdx];
-  const dark = [25, 20, 10, 2.5, 1.25].includes(p.kg) ? ' dark' : '';
+  const dark = DARK_PLATE_KG.has(p.kg) ? ' dark' : '';
   let cls = `plate ${p.cls}${dark}`;
   if (opts) {
     if (opts.added)   cls += opts.side === 'left' ? ' added-left' : ' added-right';
@@ -190,22 +193,23 @@ function plateChips(stack) {
       parts.push(`<span class="chip" aria-label="${n} ${lbl} kilogram plate${n !== 1 ? 's' : ''}${scope}">${n}× ${lbl} kg</span>`);
     }
   }
-  return parts.length ? parts.join(' ') : '<span class="chip">bar only</span>';
+  return parts.length ? parts.join(' ') : `<span class="chip">${emptyLoadLabel()}</span>`;
 }
 
 const deltaClass = (n) => n === 0 ? 'zero' : n <= 4 ? 'few' : 'many';
 const moveLabel = (n) => `${n} move${n === 1 ? '' : 's'}`;
 const plateLabel = (n) => `${n} plate${n === 1 ? '' : 's'}`;
+const emptyLoadLabel = () => BAR === 0 ? 'no plates' : 'bar only';
 
 // toFixed(2) ensures a decimal, then strip trailing zeros AND the dangling
 // decimal point. A one-liner regex would eat legit trailing zeros from
 // whole numbers (280 → "28", 10 → "1", 0 → "").
 const fmtKg = (x) => x.toFixed(2).replace(/0+$/, '').replace(/\.$/, '');
 
-function changeText(r, mode) {
+function changeText(r, mode, isInitialLoad) {
   const kgDetail = (mode === 'kg' || mode === 'sqrt')
     ? ` <span class="kg-detail">${fmtKg(r.bothSidesKg)} kg</span>` : '';
-  if (r.isStart) {
+  if (isInitialLoad) {
     return `<span class="delta ${deltaClass(r.bothSidesMoves)}">load ${plateLabel(r.bothSidesMoves)}</span>${kgDetail}`;
   }
   if (r.bothSidesMoves === 0) return `<span class="delta zero">no change</span>`;
@@ -218,45 +222,48 @@ function changeText(r, mode) {
 function renderResults(results, hasStart) {
   const out = $('output');
   const summaryPanel = $('summaryPanel');
+  const fragment = document.createDocumentFragment();
 
-  out.innerHTML = '';
   let totalMoves = 0, totalKg = 0, totalSqrt = 0, validSets = 0;
   const userSetCount = Math.max(0, results.length - (hasStart ? 1 : 0));
-  let prevStack = [];
+  let previousStack = [];
   let pendingCleanup = null;
-  let setNum = 0;  // 1-based count of "real" sets (excludes the starting state)
+  let physicalIndex = 0;
+  let setNum = 0;  // 1-based user-set count; excludes the pinned starting state.
 
-  results.forEach((r, idx) => {
-    const isStartingState = hasStart && idx === 0;
+  for (const r of results) {
+    const isStartingState = r.valid && hasStart && physicalIndex === 0;
     const card = document.createElement('div');
     card.className = 'set' + (r.valid ? '' : ' invalid') + (isStartingState ? ' starting' : '');
+
     if (!r.valid) {
-      const label = isStartingState ? 'START' : `<span class="n">${++setNum}</span>SET`;
       card.innerHTML = `
         <div class="set-head">
-          <div class="set-num">${label}</div>
+          <div class="set-num"><span class="n">${++setNum}</span>SET</div>
           <div class="set-total">${r.total}<span class="unit">kg</span></div>
           <div class="set-changes"><span class="delta many">invalid</span></div>
         </div>
         <div class="invalid-msg">${esc(r.reason)}<span class="skip-note">Skipped; surrounding valid sets remain globally optimised together.</span></div>`;
-      out.appendChild(card);
-      return;
+      fragment.appendChild(card);
+      continue;
     }
 
+    const isInitialLoad = !hasStart && physicalIndex === 0;
     if (!isStartingState) {
       setNum++;
       validSets++;
       totalMoves += r.bothSidesMoves;
-      totalKg    += r.bothSidesKg;
-      totalSqrt  += r.bothSidesSqrtKg;
+      totalKg += r.bothSidesKg;
+      totalSqrt += r.bothSidesSqrtKg;
     }
 
     const numLabel = isStartingState
-      ? '<span class="n start-label">▶</span>START'
+      ? '<span class="n start-label" aria-hidden="true">▶</span>START'
       : `<span class="n">${setNum}</span>SET`;
     const changes = isStartingState
-      ? `<span class="delta zero">already loaded</span>`
-      : changeText(r, CURRENT_MODE);
+      ? '<span class="delta zero">already loaded</span>'
+      : changeText(r, CURRENT_MODE, isInitialLoad);
+    const fromStack = isStartingState || isInitialLoad ? [] : previousStack;
 
     card.innerHTML = `
       <div class="set-head">
@@ -264,15 +271,16 @@ function renderResults(results, hasStart) {
         <div class="set-total">${r.total}<span class="unit">kg</span></div>
         <div class="set-changes">${changes}</div>
       </div>
-      ${renderBar(r.stack, isStartingState ? [] : (r.isStart ? [] : prevStack), { animateChanges: !isStartingState })}
+      ${renderBar(r.stack, fromStack, { animateChanges: !isStartingState })}
       <div class="plate-list">${plateChips(r.stack)}${oneSided ? '' : ' <span class="scope-note">· per side</span>'}</div>`;
-    out.appendChild(card);
-    prevStack = r.stack;
+    fragment.appendChild(card);
+    previousStack = r.stack;
+    physicalIndex++;
 
     if (r.cleanup && r.cleanup.bothSidesMoves > 0) {
       pendingCleanup = { cleanup: r.cleanup, stack: r.stack };
     }
-  });
+  }
 
   // Invalid rows are annotations rather than physical bar states. Render the
   // one final unload after every user row, including trailing invalid entries.
@@ -288,12 +296,14 @@ function renderResults(results, hasStart) {
     cleanup.innerHTML = `
       <div class="set-head">
         <div class="set-num">UNLOAD</div>
-        <div class="set-total">→ bar only</div>
-        <div class="set-changes"><span class="delta ${deltaClass(cleanupData.bothSidesMoves)}">−${cleanupData.removedCount}${oneSided ? '' : '/side'} · ${moveLabel(cleanupData.bothSidesMoves)}</span>${kgDetail}</div>
+        <div class="set-total">→ ${emptyLoadLabel()}</div>
+        <div class="set-changes"><span class="delta ${deltaClass(cleanupData.bothSidesMoves)}">−${stack.length}${oneSided ? '' : '/side'} · ${moveLabel(cleanupData.bothSidesMoves)}</span>${kgDetail}</div>
       </div>
       ${renderBar([], stack)}`;
-    out.appendChild(cleanup);
+    fragment.appendChild(cleanup);
   }
+
+  out.replaceChildren(fragment);
 
   if (validSets > 0) {
     summaryPanel.hidden = false;
@@ -344,6 +354,8 @@ const startClearBtn  = $('startClear');
 const startRemoveBtn = $('startRemove');
 const monotonicToggle = $('monotonicToggle');
 const oneSidedToggle  = $('oneSidedToggle');
+const modesEl = $('modes');
+const modeButtons = Array.from(modesEl.querySelectorAll('.mode-btn'));
 let monotonic = false;
 let oneSided  = false;
 const sided = () => oneSided ? 1 : 2;
@@ -368,10 +380,9 @@ const DEFAULT_STATE = Object.freeze({
 });
 
 // startStack is an ORDERED list of plate indices, innermost → outermost.
-// Validates and clamps an array; returns null if empty / invalid.
-// Caps: the DP encodes per-type counts in 4-bit nibbles (max 15), so an
-// unbounded stack (e.g. a crafted #i= hash) would corrupt memo keys; 8 per
-// type / 24 total is far beyond any real bar and keeps the encoding safe.
+// Validates an array and keeps crafted URL/local-storage values within a
+// physically meaningful bar length. The exact optimiser itself has no hidden
+// four-bit count limit.
 const START_MAX_PER_TYPE = 8;
 const START_MAX_TOTAL    = 24;
 function normaliseStack(arr) {
@@ -395,7 +406,7 @@ function startStackTotalKg() {
 
 function updateStartTotalDisplay() {
   if (!startStack || startStack.length === 0) {
-    startTotalEl.textContent = `${fmtKg(BAR)} kg bar only`;
+    startTotalEl.textContent = BAR === 0 ? 'No plates · 0 kg' : `${fmtKg(BAR)} kg bar only`;
   } else {
     startTotalEl.textContent = `${fmtKg(startStackTotalKg())} kg`;
   }
@@ -426,6 +437,7 @@ function setStartStack(arr) {
   updateStartControls();
   updateStartTotalDisplay();
   renderStartViz();
+  updateWarmupConstraints();
 }
 
 function setMonotonic(on) {
@@ -519,7 +531,7 @@ function setBar(kg) {
   BAR = kg;
   barSelect.value = String(kg);
   const subEl = $('barSub');
-  if (subEl) subEl.textContent = `Deadlift · ${kg} kg bar`;
+  if (subEl) subEl.textContent = kg === 0 ? 'Deadlift · plates only' : `Deadlift · ${kg} kg bar`;
   if (startTotalEl) updateStartTotalDisplay();  // start total includes BAR
   if (startVizEl) renderStartViz();              // accessible description includes BAR
   updateWarmupConstraints();
@@ -528,7 +540,7 @@ function setBar(kg) {
 function setMode(m) {
   if (!['count', 'kg', 'sqrt'].includes(m)) return;
   CURRENT_MODE = m;
-  document.querySelectorAll('.mode-btn').forEach(b => {
+  modeButtons.forEach(b => {
     const on = b.dataset.mode === m;
     b.classList.toggle('active', on);
     b.setAttribute('aria-checked', on ? 'true' : 'false');
@@ -544,6 +556,7 @@ function setStock(value) {
   stockSlider.value = String(stock);
   stockValue.textContent = String(stock);
   plateMax.fill(stock);
+  updateWarmupConstraints();
   return changed;
 }
 
@@ -564,7 +577,7 @@ const updateComputeBtn = () => { goBtn.disabled = inputEl.value.trim().length ==
 let pendingCompute = false;
 function compute(forceSync) {
   debouncedCompute.cancel();
-  if (!forceSync && inflightReqs.size > 0) disposeAlgoWorker(true);
+  if (!forceSync && inflightReqId !== null) disposeAlgoWorker(true);
   // Skip while tab is hidden, but invalidate any in-flight request so its
   // stale result doesn't render after the user types more.
   if (document.visibilityState === 'hidden') {
@@ -603,9 +616,20 @@ function compute(forceSync) {
 
   const worker = forceSync ? null : ensureAlgoWorker();
   if (worker) {
-    inflightReqs.add(reqId);
-    indicatorTimers.set(reqId, setTimeout(showIndicator, INDICATOR_DELAY_MS));
-    worker.postMessage({ reqId, weights, mode: CURRENT_MODE, plateMax: plateMax.slice(), plateKg: PLATE_KG, BAR, startStack, hasStart, monotonic, sided: sided() });
+    inflightReqId = reqId;
+    indicatorReqId = reqId;
+    indicatorTimer = setTimeout(showIndicator, INDICATOR_DELAY_MS);
+    worker.postMessage({
+      reqId,
+      weights,
+      mode: CURRENT_MODE,
+      plateMax: plateMax.slice(),
+      plateKg: PLATE_KG,
+      BAR,
+      startStack,
+      monotonic,
+      sided: sided(),
+    });
     return;
   }
 
@@ -622,37 +646,53 @@ function compute(forceSync) {
   });
 }
 
-document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible' && pendingCompute) {
-    pendingCompute = false;
-    compute();
-  }
-});
-
 // ---------- warmup generator ----------
-// 50/70/85/95/100%, rounded to the actual denomination lattice.
+// 50/70/85/95/100%, projected onto weights achievable with current stock.
 const warmupIncrement = () => stateLib.totalIncrement(PLATES, sided());
-const warmupMinimum = () => BAR > 0 ? BAR : warmupIncrement();
+
+function effectivePlateMax() {
+  const maxima = plateMax.slice();
+  if (!startStack) return maxima;
+  const startingCounts = new Array(PLATES.length).fill(0);
+  for (const plateIndex of startStack) startingCounts[plateIndex]++;
+  return maxima.map((maximum, plateIndex) => Math.max(maximum, startingCounts[plateIndex]));
+}
+
+const warmupOptions = () => ({
+  bar: BAR,
+  sided: sided(),
+  plates: PLATES,
+  maxima: effectivePlateMax(),
+});
+const warmupMinimum = () => stateLib.minTotalWeight(
+  PLATES, effectivePlateMax(), BAR, sided(),
+);
+const warmupMaximum = () => stateLib.maxTotalWeight(
+  PLATES, effectivePlateMax(), BAR, sided(), MAX_TOTAL_KG,
+);
 
 function updateWarmupConstraints() {
   const note = $('warmupNote');
   const target = $('warmupTarget');
+  const button = $('warmup');
   const minimum = warmupMinimum();
+  const maximum = warmupMaximum();
+  const enabled = Number.isFinite(minimum) && maximum >= minimum;
+
   if (target) {
-    target.min = fmtKg(minimum);
-    target.max = String(MAX_TOTAL_KG);
+    target.min = enabled ? fmtKg(minimum) : '0';
+    target.max = enabled ? fmtKg(maximum) : '';
     target.setCustomValidity('');
   }
+  if (button) button.disabled = !enabled;
   if (note) {
-    note.textContent = `Will create sets at 50%, 70%, 85%, 95% and 100% (rounded to ${fmtKg(warmupIncrement())} kg; minimum ${fmtKg(minimum)} kg).`;
+    note.textContent = enabled
+      ? `Will create loadable sets at 50%, 70%, 85%, 95% and 100% (smallest denomination step ${fmtKg(warmupIncrement())} kg; maximum ${fmtKg(maximum)} kg).`
+      : 'No positive load is possible with the selected bar and available plates.';
   }
 }
 
-const generateWarmup = (targetKg) => stateLib.generateWarmup(targetKg, {
-  bar: BAR,
-  sided: sided(),
-  plates: PLATES,
-});
+const generateWarmup = (targetKg) => stateLib.generateWarmup(targetKg, warmupOptions());
 
 // ---------- state persistence (localStorage + URL hash) ----------
 const snapshotState = () => ({
@@ -723,18 +763,41 @@ function updateHash() {
 const persist = () => { saveState(); updateHash(); };
 const persistAndRecompute = (force) => { persist(); if (force || inputEl.value.trim()) compute(); };
 const debouncedCompute = debounce(compute, 250);
-const debouncedPersist = debounce(persist, 300);
+const debouncedSaveState = debounce(saveState, 300);
+const schedulePersist = () => {
+  // URL state is cheap and should survive an immediate reload; localStorage is
+  // coalesced while typing, then synchronously flushed when the page hides.
+  updateHash();
+  debouncedSaveState();
+};
 const scheduleCompute = () => {
   ++currentReqId;  // invalidate any result already in flight before the debounce fires
-  if (inflightReqs.size > 0) disposeAlgoWorker(true);
-  else for (const reqId of [...indicatorTimers.keys()]) clearIndicator(reqId);
+  if (inflightReqId !== null) disposeAlgoWorker(true);
+  else clearIndicator();
   debouncedCompute();
 };
+
+function flushPersistence() {
+  debouncedSaveState.cancel();
+  persist();
+}
+
+window.addEventListener('pagehide', flushPersistence);
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') {
+    flushPersistence();
+    return;
+  }
+  if (pendingCompute) {
+    pendingCompute = false;
+    compute();
+  }
+});
 
 // ---------- event wire-up ----------
 stockSlider.addEventListener('input', () => {
   if (!setStock(parseInt(stockSlider.value, 10))) return;
-  debouncedPersist();
+  schedulePersist();
   if (inputEl.value.trim()) scheduleCompute();
 });
 
@@ -760,15 +823,15 @@ startClearBtn.addEventListener('click', () => {
   persistAndRecompute();
 });
 
-document.querySelectorAll('.mode-btn').forEach(btn => {
+modeButtons.forEach(btn => {
   btn.addEventListener('click', () => { setMode(btn.dataset.mode); persistAndRecompute(); });
 });
 
 // Arrow-key navigation within the radio group (ARIA pattern).
-$('modes').addEventListener('keydown', (e) => {
+modesEl.addEventListener('keydown', (e) => {
   const keys = ['ArrowRight','ArrowLeft','ArrowUp','ArrowDown','Home','End'];
   if (!keys.includes(e.key)) return;
-  const btns = Array.from(document.querySelectorAll('.mode-btn'));
+  const btns = modeButtons;
   const curr = btns.findIndex(b => b.classList.contains('active'));
   let next = curr;
   if (e.key === 'ArrowRight' || e.key === 'ArrowDown') next = (curr + 1) % btns.length;
@@ -784,7 +847,7 @@ $('modes').addEventListener('keydown', (e) => {
 inputEl.addEventListener('input', () => {
   clearInputErrorState();
   updateComputeBtn();
-  debouncedPersist();
+  schedulePersist();
   scheduleCompute();
 });
 inputEl.addEventListener('keydown', (e) => {
@@ -810,17 +873,19 @@ compactBtn.addEventListener('click', () => {
 
 // Warmup dialog
 const warmupDialog = $('warmupDialog'), warmupTarget = $('warmupTarget'), warmupForm = $('warmupForm');
+const warmupBtn = $('warmup');
 
 function closeWarmupDialog() {
   if (typeof warmupDialog.close === 'function') warmupDialog.close();
   else warmupDialog.removeAttribute('open');
 }
 
-$('warmup').addEventListener('click', () => {
+warmupBtn.addEventListener('click', () => {
   if (inputEl.value.trim() && !confirm('Replace current sets with a generated warmup?')) return;
   updateWarmupConstraints();
   const minimum = warmupMinimum();
-  warmupTarget.value = fmtKg(Math.max(minimum, 140));
+  const maximum = warmupMaximum();
+  warmupTarget.value = fmtKg(Math.min(maximum, Math.max(minimum, 140)));
   if (typeof warmupDialog.showModal === 'function') warmupDialog.showModal();
   else warmupDialog.setAttribute('open', '');
   requestAnimationFrame(() => { warmupTarget.focus(); warmupTarget.select(); });
@@ -832,17 +897,31 @@ warmupForm.addEventListener('submit', (e) => {
   e.preventDefault();
   const kg = Number(warmupTarget.value);
   const minimum = warmupMinimum();
+  const maximum = warmupMaximum();
+  const options = warmupOptions();
   warmupTarget.setCustomValidity('');
-  if (!Number.isFinite(kg) || kg < minimum || kg > MAX_TOTAL_KG) {
+  if (!Number.isFinite(kg) || kg < minimum || kg > maximum) {
     warmupTarget.setCustomValidity(
-      `Enter a target between ${fmtKg(minimum)} and ${MAX_TOTAL_KG} kg for the selected bar.`,
+      `Enter a target between ${fmtKg(minimum)} and ${fmtKg(maximum)} kg for the selected bar and stock.`,
     );
+    warmupTarget.reportValidity();
+    return;
+  }
+  if (!stateLib.isAchievableTotal(kg, options)) {
+    warmupTarget.setCustomValidity('That target cannot be loaded with the selected plates and stock.');
+    warmupTarget.reportValidity();
+    return;
+  }
+
+  const generated = generateWarmup(kg);
+  if (generated.length === 0) {
+    warmupTarget.setCustomValidity('No achievable warm-up sequence was found.');
     warmupTarget.reportValidity();
     return;
   }
 
   closeWarmupDialog();
-  inputEl.value = generateWarmup(kg).join('\n');
+  inputEl.value = generated.join('\n');
   updateComputeBtn();
   persist();
   compute();
@@ -966,8 +1045,7 @@ function showUpdateToast(worker = null) {
   toast = document.createElement('div');
   toast.id = 'updateToast';
   toast.className = 'update-toast';
-  toast.setAttribute('role', 'status');
-  toast.innerHTML = '<span>New version available.</span> <button type="button" id="updateReload">Reload</button>';
+  toast.innerHTML = '<span role="status">New version available.</span> <button type="button" id="updateReload">Reload</button>';
   document.body.appendChild(toast);
 
   $('updateReload').addEventListener('click', () => {

@@ -17,7 +17,7 @@ self.onmessage = function (event) {
       data.monotonic,
       data.sided,
     );
-    self.postMessage({ reqId: data.reqId, hasStart: data.hasStart, results });
+    self.postMessage({ reqId: data.reqId, results });
   } catch (error) {
     self.postMessage({
       reqId: event.data?.reqId ?? -1,

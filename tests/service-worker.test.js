@@ -9,13 +9,8 @@ const vm = require('node:vm');
 const source = fs.readFileSync(path.resolve(__dirname, '..', 'sw.js'), 'utf8');
 const BUILD_PLACEHOLDER = '__PLATELOADER_BUILD_ID__';
 
-function shortHash(value) {
-  let hash = 2166136261;
-  for (let index = 0; index < value.length; index++) {
-    hash ^= value.charCodeAt(index);
-    hash = Math.imul(hash, 16777619);
-  }
-  return (hash >>> 0).toString(36);
+function cachePrefix(scope) {
+  return `plateloader:${scope}:`;
 }
 
 function createHarness(options = {}) {
@@ -57,16 +52,17 @@ function createHarness(options = {}) {
     async skipWaiting() { skipWaitingCalls++; },
     addEventListener(type, listener) { listeners[type] = listener; },
   };
-  const fetchImpl = options.fetch || (async (request) => {
-    fetchCalls.push(typeof request === 'string' ? request : request.url);
-    return new Response('network', { status: 200 });
+  const recordFetch = (request) => fetchCalls.push({
+    url: typeof request === 'string' ? request : request.url,
+    cache: typeof request === 'string' ? undefined : request.cache,
   });
+  const fetchImpl = options.fetch || (async () => new Response('network', { status: 200 }));
 
   vm.runInNewContext(source, {
     self,
     caches,
     fetch: async (request) => {
-      if (options.fetch) fetchCalls.push(typeof request === 'string' ? request : request.url);
+      recordFetch(request);
       return fetchImpl(request);
     },
     location: new URL(scope),
@@ -75,7 +71,6 @@ function createHarness(options = {}) {
     Request,
     Response,
     Promise,
-    Math,
   }, { filename: 'sw.js' });
 
   return {
@@ -111,8 +106,9 @@ function dispatchExtendable(listener, extra = {}) {
   return { lifetime: Promise.all(lifetimes), lifetimes, response };
 }
 
-test('install uses a scope-isolated cache, bypasses HTTP cache and waits for explicit activation', async () => {
-  const harness = createHarness();
+test('install uses an exact scope-isolated cache, bypasses HTTP cache and waits for explicit activation', async () => {
+  const scope = 'https://example.test/app/';
+  const harness = createHarness({ scope });
   const { lifetime } = dispatchExtendable(harness.listeners.install);
   await lifetime;
 
@@ -121,11 +117,7 @@ test('install uses a scope-isolated cache, bypasses HTTP cache and waits for exp
   assert.ok(harness.addedShells[0].some((request) => request.url.endsWith('/algo-worker.js')));
   assert.ok(harness.addedShells[0].every((request) => request.cache === 'reload'));
   assert.equal(harness.skipWaitingCalls, 0);
-  assert.equal(harness.openedCaches.length, 1);
-  assert.match(
-    harness.openedCaches[0],
-    new RegExp(`^plateloader-${shortHash('https://example.test/app/')}-${BUILD_PLACEHOLDER}$`),
-  );
+  assert.deepEqual(harness.openedCaches, [`${cachePrefix(scope)}${BUILD_PLACEHOLDER}`]);
 });
 
 test('SKIP_WAITING messages explicitly activate the waiting worker', async () => {
@@ -137,11 +129,11 @@ test('SKIP_WAITING messages explicitly activate the waiting worker', async () =>
   assert.equal(harness.skipWaitingCalls, 1);
 });
 
-test('activation removes only this scope generation plus legacy unscoped caches', async () => {
+test('activation removes only obsolete generations for this exact deployment scope', async () => {
   const scope = 'https://example.test/app/';
-  const current = `plateloader-${shortHash(scope)}-${BUILD_PLACEHOLDER}`;
-  const oldScoped = `plateloader-${shortHash(scope)}-older-build`;
-  const otherScoped = `plateloader-${shortHash('https://example.test/other/')}-other-build`;
+  const current = `${cachePrefix(scope)}${BUILD_PLACEHOLDER}`;
+  const oldScoped = `${cachePrefix(scope)}older-build`;
+  const otherScoped = `${cachePrefix('https://example.test/other/')}other-build`;
   const harness = createHarness({
     scope,
     cacheNames: [current, oldScoped, otherScoped, 'plateloader-v13', 'other-app-v3'],
@@ -149,20 +141,31 @@ test('activation removes only this scope generation plus legacy unscoped caches'
   const { lifetime } = dispatchExtendable(harness.listeners.activate);
   await lifetime;
 
-  assert.deepEqual(harness.deletedCaches, [oldScoped, 'plateloader-v13']);
+  assert.deepEqual(harness.deletedCaches, [oldScoped]);
   assert.equal(harness.claimCalls, 1);
 });
 
-test('known assets are served from canonical cache keys and refreshed in-event', async () => {
+test('cached shell assets are immutable and never refreshed by an older worker', async () => {
   const url = 'https://example.test/app/plateloader.js';
   const harness = createHarness({ cacheEntries: [[url, new Response('cached')]] });
   const request = { method: 'GET', url: `${url}?v=123#ignored`, mode: 'cors', destination: 'script' };
-  const { lifetime, response } = dispatchExtendable(harness.listeners.fetch, { request });
+  const { lifetimes, response } = dispatchExtendable(harness.listeners.fetch, { request });
 
   assert.ok(response);
   assert.equal(await (await response).text(), 'cached');
-  await lifetime;
-  assert.deepEqual(harness.fetchCalls, [url]);
+  assert.equal(lifetimes.length, 0);
+  assert.deepEqual(harness.fetchCalls, []);
+  assert.deepEqual(harness.cachePuts, []);
+});
+
+test('a shell cache miss bypasses HTTP cache and is stored in the current generation', async () => {
+  const url = 'https://example.test/app/plateloader.js';
+  const harness = createHarness();
+  const request = { method: 'GET', url: `${url}?v=123`, mode: 'cors', destination: 'script' };
+  const { response } = dispatchExtendable(harness.listeners.fetch, { request });
+
+  assert.equal(await (await response).text(), 'network');
+  assert.deepEqual(harness.fetchCalls, [{ url, cache: 'reload' }]);
   assert.deepEqual(harness.cachePuts, [url]);
 });
 
@@ -178,9 +181,8 @@ test('scope navigation falls back to cached index when offline', async () => {
     mode: 'navigate',
     destination: 'document',
   };
-  const { lifetime, response } = dispatchExtendable(harness.listeners.fetch, { request });
+  const { response } = dispatchExtendable(harness.listeners.fetch, { request });
   assert.equal(await (await response).text(), 'offline shell');
-  await lifetime;
 });
 
 test('unknown, cross-origin and non-GET requests pass through', () => {
