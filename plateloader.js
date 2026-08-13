@@ -18,10 +18,52 @@ const DEFAULT_BAR = 20;
 let BAR = DEFAULT_BAR;
 let plateMax = PLATES.map(() => 2);
 
-// Algorithm: buildAlgoLib is defined in algo.js, loaded before this file.
-
-const algoLib = buildAlgoLib();
 const stateLib = buildStateLib();
+let algoLib = null;
+let algoLibPromise = null;
+
+// The normal path runs the exact optimiser in a worker, so avoid parsing its
+// 600-line implementation on the main thread as well. Load it here only when
+// workers are unavailable or fail.
+function ensureSyncAlgoLib() {
+  if (algoLib) return Promise.resolve(algoLib);
+  if (algoLibPromise) return algoLibPromise;
+
+  algoLibPromise = new Promise((resolve, reject) => {
+    const initialise = () => {
+      try {
+        if (typeof buildAlgoLib !== 'function') throw new Error('Optimiser did not initialise.');
+        algoLib = buildAlgoLib();
+        resolve(algoLib);
+      } catch (error) {
+        reject(error);
+      }
+    };
+
+    if (typeof buildAlgoLib === 'function') {
+      initialise();
+      return;
+    }
+
+    const script = document.createElement('script');
+    script.src = 'algo.js';
+    script.async = true;
+    script.addEventListener('load', () => {
+      script.remove();
+      initialise();
+    }, { once: true });
+    script.addEventListener('error', () => {
+      script.remove();
+      reject(new Error('Could not load the optimiser.'));
+    }, { once: true });
+    document.head.appendChild(script);
+  }).catch((error) => {
+    algoLibPromise = null;
+    throw error;
+  });
+
+  return algoLibPromise;
+}
 
 // ---------- Web Worker for off-main-thread optimisation ----------
 // Cancellation is by reqId: stale results are discarded silently.
@@ -62,18 +104,22 @@ function ensureAlgoWorker() {
   try {
     const worker = new Worker('algo-worker.js');
     worker.onmessage = (event) => {
-      const { reqId, results, error, hasStart } = event.data;
+      const { reqId, results, error, hasStart } = event.data || {};
       if (inflightReqId === reqId) inflightReqId = null;
       clearIndicator(reqId);
       if (reqId !== currentReqId) return;
-      if (error) {
-        console.warn('[plate-loader] worker error, retrying sync:', error);
+      if (error || !Array.isArray(results)) {
+        console.warn('[plate-loader] worker error, retrying sync:', error || 'invalid result');
         disposeAlgoWorker(false);
         compute(true);
         return;
       }
       workerEverSucceeded = true;
-      renderResults(results, hasStart === true);
+      try {
+        renderResults(results, hasStart === true);
+      } catch (renderError) {
+        renderComputeError(renderError);
+      }
     };
     worker.onerror = (event) => {
       // Quiet on first failure (usually a worker-policy restriction); log if
@@ -589,7 +635,8 @@ function setBar(kg) {
 }
 
 function setMode(m) {
-  if (!['count', 'kg', 'sqrt'].includes(m)) return;
+  if (!['count', 'kg', 'sqrt'].includes(m)) return false;
+  const changed = CURRENT_MODE !== m;
   CURRENT_MODE = m;
   modeButtons.forEach(b => {
     const on = b.dataset.mode === m;
@@ -598,6 +645,7 @@ function setMode(m) {
     // ARIA radio pattern: only the active radio is in the tab order.
     b.tabIndex = on ? 0 : -1;
   });
+  return changed;
 }
 
 function setStock(value) {
@@ -687,26 +735,30 @@ function compute(forceSync) {
     }
   }
 
-  // Sync path: yield twice via rAF so the indicator paints BEFORE optimize()
-  // blocks the main thread. Otherwise the user sees a frozen UI for slow
-  // computes (the 150ms timer can't fire mid-block).
+  // Sync fallback: load the optimiser on demand, then yield via rAF so the
+  // indicator paints before optimize() blocks the main thread.
   requestAnimationFrame(() => {
     if (currentReqId !== reqId) return;
     showIndicator();
-    requestAnimationFrame(() => {
+    ensureSyncAlgoLib().then((library) => {
       if (currentReqId !== reqId) return;
-      try {
-        const results = algoLib.optimize(
-          weights, CURRENT_MODE, plateMax, PLATE_KG, BAR,
-          requestedStartStack, monotonic, sided(),
-        );
-        const resultHasStart = Boolean(
-          requestedStartStack && results.length === weights.length + 1
-        );
-        renderResults(results, resultHasStart);
-      } catch (error) {
-        if (currentReqId === reqId) renderComputeError(error);
-      }
+      requestAnimationFrame(() => {
+        if (currentReqId !== reqId) return;
+        try {
+          const results = library.optimize(
+            weights, CURRENT_MODE, plateMax, PLATE_KG, BAR,
+            requestedStartStack, monotonic, sided(),
+          );
+          const resultHasStart = Boolean(
+            requestedStartStack && results.length === weights.length + 1
+          );
+          renderResults(results, resultHasStart);
+        } catch (error) {
+          if (currentReqId === reqId) renderComputeError(error);
+        }
+      });
+    }).catch((error) => {
+      if (currentReqId === reqId) renderComputeError(error);
     });
   });
 }
@@ -890,7 +942,9 @@ startClearBtn.addEventListener('click', () => {
 });
 
 modeButtons.forEach(btn => {
-  btn.addEventListener('click', () => { setMode(btn.dataset.mode); persistAndRecompute(); });
+  btn.addEventListener('click', () => {
+    if (setMode(btn.dataset.mode)) persistAndRecompute();
+  });
 });
 
 // Arrow-key navigation within the radio group (ARIA pattern).
@@ -1085,6 +1139,9 @@ if (inputEl.value.trim()) compute();
 
 window.addEventListener('hashchange', () => {
   if (!applyHash(location.hash)) {
+    // Non-state anchors belong to the document and must not overwrite the
+    // live calculator state. An empty hash deliberately restores saved state.
+    if (location.hash) return;
     applyState(DEFAULT_STATE);
     loadStateFromStorage();
   }

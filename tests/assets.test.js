@@ -50,7 +50,6 @@ function listFiles(directory, relativeRoot = directory) {
 }
 
 function expectedBuildId() {
-  const version = JSON.parse(read('package.json')).version;
   const hash = crypto.createHash('sha256');
   const files = [
     ...textAssets,
@@ -63,7 +62,7 @@ function expectedBuildId() {
     hash.update(fs.readFileSync(path.join(root, file)));
     hash.update('\0');
   }
-  return `v${version}-${hash.digest('hex').slice(0, 12)}`;
+  return hash.digest('hex').slice(0, 16);
 }
 
 function pngDimensions(file) {
@@ -83,6 +82,10 @@ test('HTML copy, optimisation semantics and accessibility match the application 
   assert.match(html, /<link rel="canonical" href="https:\/\/senegrom\.github\.io\/plateloader\/"\/>/);
   assert.match(html, /<meta property="og:url" content="https:\/\/senegrom\.github\.io\/plateloader\/"\/>/);
   assert.match(html, /<meta name="twitter:card" content="summary"\/>/);
+  assert.match(html, /<main class="wrap">/);
+  assert.doesNotMatch(html, /<script src="algo\.js"/);
+  assert.match(html, /data-mode="count"[^>]*tabindex="0"/);
+  assert.equal((html.match(/tabindex="-1"/g) || []).length, 2);
 
   const summary = html.match(/<summary>[\s\S]*?<\/summary>/)?.[0];
   assert.ok(summary, 'starting-stack summary missing');
@@ -131,6 +134,9 @@ test('UI source covers lifecycle persistence, compact worker state and stock-awa
   assert.match(app, /one final unload after every user row/);
   assert.match(app, /stateLib\.isMonotonicStack/);
   assert.match(app, /function renderComputeError\(error\)/);
+  assert.match(app, /function ensureSyncAlgoLib\(\)/);
+  assert.match(app, /error \|\| !Array\.isArray\(results\)/);
+  assert.match(app, /if \(location\.hash\) return/);
   assert.match(app, /worker\.postMessage\([\s\S]*catch \(error\)/);
   assert.match(app, /results\.length === weights\.length \+ 1/);
   assert.doesNotMatch(app, /startStack\.sort|startStack = startStack\.slice\(\)\.sort/);
@@ -162,9 +168,11 @@ test('the optimiser uses collision-free compact state and exact branch pruning',
 test('the builder removes the CodeQL finding and produces deterministic source-faithful output', () => {
   const builder = read('scripts/build-site.js');
   assert.doesNotMatch(builder, /minifyHtml|minifyCss|minifyJavaScript/);
+  assert.doesNotMatch(builder, /package\.json/);
   assert.doesNotMatch(builder, /<!--\(\?!|\[\\s\\S\]\*\?/);
   assert.match(builder, /BUILD_PLACEHOLDER/);
-  assert.match(builder, /renameSync\(temporaryOutput, output\)/);
+  assert.match(builder, /renameBuildPath\(temporaryOutput, output\)/);
+  assert.match(builder, /RENAME_RETRY_CODES/);
   assert.match(builder, /_site\.lock/);
   assert.match(builder, /owner\.runId !== runId/);
   assert.match(builder, /recoverInterruptedBuild/);
@@ -276,22 +284,21 @@ test('committed icons retain their compressed hashes and declared dimensions', (
   }
 });
 
-test('all deliberately duplicated font files remain byte-for-byte unchanged', () => {
+test('font assets contain one copy of each payload', () => {
   const expected = {
     'BebasNeue-400.woff2': 'a7c90c89240c134f7fdd33d40c000ec90b79d675ea53e8cc5a6d423c073de412',
     'Inter-400.woff2': '3100e775e8616cd2611beecfa23a4263d7037586789b43f035236a2e6fbd4c62',
-    'Inter-500.woff2': '3100e775e8616cd2611beecfa23a4263d7037586789b43f035236a2e6fbd4c62',
-    'Inter-600.woff2': '3100e775e8616cd2611beecfa23a4263d7037586789b43f035236a2e6fbd4c62',
     'JetBrainsMono-400.woff2': '83c005d49d8a6a50474c73a5a36ac0468076e9c4a29da7bdb14995d80560a5be',
-    'JetBrainsMono-700.woff2': '83c005d49d8a6a50474c73a5a36ac0468076e9c4a29da7bdb14995d80560a5be',
   };
+  assert.deepEqual(fs.readdirSync(path.join(root, 'fonts')).sort(), Object.keys(expected).sort());
+  assert.equal(new Set(Object.values(expected)).size, Object.keys(expected).length);
   for (const [name, hash] of Object.entries(expected)) {
     assert.equal(sha256(fs.readFileSync(path.join(root, 'fonts', name))), hash, name);
   }
 });
 
 test('CI builds once, deploys the tested artifact and keeps the deploy job lean', () => {
-  const workflow = read('.github/workflows/pages.yml');
+  const workflow = read('.github/workflows/pages.yml').replace(/\r\n?/g, '\n');
   assert.equal((workflow.match(/actions\/checkout@/g) || []).length, 1);
   assert.equal((workflow.match(/actions\/setup-node@/g) || []).length, 1);
   assert.match(workflow, /\n  build:\n/);

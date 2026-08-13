@@ -21,11 +21,8 @@ const APP_SHELL = [
   'algo-worker.js',
   'manifest.json',
   'fonts/Inter-400.woff2',
-  'fonts/Inter-500.woff2',
-  'fonts/Inter-600.woff2',
   'fonts/BebasNeue-400.woff2',
   'fonts/JetBrainsMono-400.woff2',
-  'fonts/JetBrainsMono-700.woff2',
   'icons/plateloader-180.png',
   'icons/plateloader-192.png',
   'icons/plateloader-512.png',
@@ -110,6 +107,7 @@ async function cachedShellResponse(cacheKey, isNavigation) {
 self.addEventListener('fetch', (event) => {
   const request = event.request;
   if (request.method !== 'GET') return;
+  if (request.headers && request.headers.has('range')) return;
 
   const cacheKey = cacheKeyFor(request);
   if (!cacheKey) return;

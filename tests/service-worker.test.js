@@ -241,6 +241,13 @@ test('unknown, cross-origin and non-GET requests pass through', () => {
     { method: 'GET', url: 'https://example.test/app/random.json', mode: 'cors', destination: '' },
     { method: 'GET', url: 'https://other.test/app/plateloader.js', mode: 'cors', destination: 'script' },
     { method: 'POST', url: 'https://example.test/app/plateloader.js', mode: 'cors', destination: 'script' },
+    {
+      method: 'GET',
+      url: 'https://example.test/app/fonts/Inter-400.woff2',
+      mode: 'cors',
+      destination: 'font',
+      headers: { has: (name) => name.toLowerCase() === 'range' },
+    },
   ];
 
   for (const request of cases) {

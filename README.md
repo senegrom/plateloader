@@ -33,6 +33,8 @@ npm test
 npm run build
 ```
 
-The build is deterministic, single-writer, crash-recoverable and atomic. It writes `_site`, copies source assets without ad-hoc HTML/CSS/JavaScript rewriting, injects a content-derived service-worker build ID, and leaves all source files readable. App-shell cache generations are immutable and isolated by the exact service-worker registration scope. Runtime cache failures degrade to network loading instead of discarding a successful response.
+The build is deterministic, single-writer, crash-recoverable and atomic. It writes `_site`, copies source assets without ad-hoc HTML/CSS/JavaScript rewriting, injects a content-only service-worker build ID, retries transient Windows rename failures, and leaves all source files readable. App-shell cache generations are immutable and isolated by the exact service-worker registration scope. Runtime cache failures degrade to network loading instead of discarding a successful response.
+
+The worker-first runtime loads the exact optimiser on the main thread only as a fallback. Each distinct font payload is stored once, and committed text files use LF so builds remain reproducible across platforms.
 
 URL state is updated immediately while local storage is coalesced during typing and flushed when the page hides, so rapid reloads retain the latest input.

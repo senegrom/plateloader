@@ -17,6 +17,9 @@ const lockDirectory = path.join(root, '_site.lock');
 const LOCK_STALE_MS = 60 * 60 * 1000;
 const BUILD_STALE_MS = 24 * 60 * 60 * 1000;
 const BUILD_PLACEHOLDER = '__PLATELOADER_BUILD_ID__';
+const RENAME_RETRY_CODES = new Set(['EACCES', 'EBUSY', 'EPERM']);
+const RENAME_RETRY_DELAYS_MS = [10, 25, 50, 100, 250];
+const RENAME_WAIT_ARRAY = new Int32Array(new SharedArrayBuffer(4));
 const textAssets = [
   'index.html',
   'plateloader.css',
@@ -76,7 +79,6 @@ function listFiles(directory, relativeRoot = directory) {
 }
 
 function buildId() {
-  const packageJson = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
   const hash = crypto.createHash('sha256');
   const files = [
     ...textAssets,
@@ -89,14 +91,28 @@ function buildId() {
     hash.update(fs.readFileSync(path.join(root, file)));
     hash.update('\0');
   }
-  return `v${packageJson.version}-${hash.digest('hex').slice(0, 12)}`;
+  return hash.digest('hex').slice(0, 16);
 }
 
 function removeBuildPath(target) {
   if (!fs.existsSync(target)) return;
   const stat = fs.lstatSync(target);
   if (stat.isSymbolicLink()) fs.unlinkSync(target);
-  else fs.rmSync(target, { recursive: true, force: true });
+  else fs.rmSync(target, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+}
+
+function renameBuildPath(source, destination) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      fs.renameSync(source, destination);
+      return;
+    } catch (error) {
+      if (!RENAME_RETRY_CODES.has(error && error.code) || attempt >= RENAME_RETRY_DELAYS_MS.length) {
+        throw error;
+      }
+      Atomics.wait(RENAME_WAIT_ARRAY, 0, 0, RENAME_RETRY_DELAYS_MS[attempt]);
+    }
+  }
 }
 
 function acquireBuildLock() {
@@ -160,7 +176,7 @@ function recoverInterruptedBuild() {
   const backups = matchingBuildDirectories('old')
     .filter(({ stat }) => !stat.isSymbolicLink() && stat.isDirectory())
     .sort((left, right) => right.stat.mtimeMs - left.stat.mtimeMs);
-  if (backups.length > 0) fs.renameSync(backups[0].target, output);
+  if (backups.length > 0) renameBuildPath(backups[0].target, output);
 }
 
 function pruneStaleBuildDirectories() {
@@ -203,14 +219,14 @@ function writeSite() {
 
       let backedUp = false;
       if (fs.existsSync(output)) {
-        fs.renameSync(output, backupOutput);
+        renameBuildPath(output, backupOutput);
         backedUp = true;
       }
 
       try {
-        fs.renameSync(temporaryOutput, output);
+        renameBuildPath(temporaryOutput, output);
       } catch (error) {
-        if (backedUp && !fs.existsSync(output)) fs.renameSync(backupOutput, output);
+        if (backedUp && !fs.existsSync(output)) renameBuildPath(backupOutput, output);
         throw error;
       }
 
@@ -219,7 +235,7 @@ function writeSite() {
     } catch (error) {
       removeBuildPath(temporaryOutput);
       if (fs.existsSync(backupOutput) && !fs.existsSync(output)) {
-        fs.renameSync(backupOutput, output);
+        renameBuildPath(backupOutput, output);
       }
       throw error;
     }

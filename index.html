@@ -25,7 +25,7 @@
 <link rel="stylesheet" href="plateloader.css"/>
 </head>
 <body>
-<div class="wrap">
+<main class="wrap">
   <header>
     <h1>Plate <span class="accent">Loader</span></h1>
     <div class="sub" id="barSub">Deadlift · 20 kg bar</div>
@@ -86,15 +86,15 @@
 
     <h2 id="lbl-mode">Optimisation mode</h2>
     <div class="modes" id="modes" role="radiogroup" aria-labelledby="lbl-mode">
-      <button type="button" class="mode-btn active" data-mode="count" role="radio" aria-checked="true">
+      <button type="button" class="mode-btn active" data-mode="count" role="radio" aria-checked="true" tabindex="0">
         <span class="label">Min plate moves</span>
         <span class="desc">Fewest moves overall. Tiebreak: lighter kg moved.</span>
       </button>
-      <button type="button" class="mode-btn" data-mode="kg" role="radio" aria-checked="false">
+      <button type="button" class="mode-btn" data-mode="kg" role="radio" aria-checked="false" tabindex="-1">
         <span class="label">Min total kg moved</span>
         <span class="desc">Sum of plate weights handled. Avoids lifting heavy plates.</span>
       </button>
-      <button type="button" class="mode-btn" data-mode="sqrt" role="radio" aria-checked="false">
+      <button type="button" class="mode-btn" data-mode="sqrt" role="radio" aria-checked="false" tabindex="-1">
         <span class="label">Min Σ√kg moved</span>
         <span class="desc">Sublinear: discounts heavier plates relative to total-kg mode, usually favouring fewer larger plates.</span>
       </button>
@@ -123,7 +123,7 @@
   <div class="sets" id="output"></div>
 
   <footer>Valid sets are globally optimised across the whole sequence; invalid entries are skipped.</footer>
-</div>
+</main>
 
 <dialog id="warmupDialog" class="warmup" aria-labelledby="lbl-warmup">
   <form method="dialog" id="warmupForm">
@@ -138,7 +138,6 @@
   </form>
 </dialog>
 
-<script src="algo.js" defer></script>
 <script src="state.js" defer></script>
 <script src="plateloader.js" defer></script>
 </body>
