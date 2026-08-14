@@ -14,6 +14,7 @@ const defaults = Object.freeze({
   monotonic: false,
   oneSided: false,
   compact: false,
+  customStock: null,
 });
 const plates = [
   { kg: 25, label: '25' },
@@ -80,7 +81,35 @@ test('partial hashes resolve omitted fields to defaults instead of saved state',
     monotonic: false,
     oneSided: false,
     compact: false,
+    customStock: null,
   });
+});
+
+
+test('input character limits bound crafted values before tokenisation', () => {
+  const parsed = state.parseWeightInput('123456789', {
+    maxSets: 50,
+    maxKg: 1000,
+    maxChars: 8,
+  });
+  assert.deepEqual(parsed.weights, []);
+  assert.equal(parsed.tokenCount, 0);
+  assert.deepEqual(parsed.errors, ['Enter no more than 8 characters (found 9).']);
+});
+
+test('custom stock vectors are exact, bounded and shareable', () => {
+  assert.deepEqual(state.parseStockVector('0.1.2.3.4.5.6'), [0, 1, 2, 3, 4, 5, 6]);
+  assert.deepEqual(state.parseStockVector([6, 5, 4, 3, 2, 1, 0]), [6, 5, 4, 3, 2, 1, 0]);
+  assert.equal(state.parseStockVector('0.1.2'), null);
+  assert.equal(state.parseStockVector('0.1.2.3.4.5.7'), null);
+  assert.equal(state.parseStockVector('0.1.2.3.4.5.x'), null);
+  assert.equal(state.parseStockVector('0.1.2.3.4.5.'), null);
+
+  assert.deepEqual(
+    state.stateFromHash('#w=60&p=0.1.2.3.4.5.6', defaults).customStock,
+    [0, 1, 2, 3, 4, 5, 6],
+  );
+  assert.equal(state.stateFromHash('#w=60&p=0.1.bad', defaults).customStock, null);
 });
 
 test('integer clamping never uses signed 32-bit coercion', () => {
@@ -122,6 +151,12 @@ test('the achievable total increment is derived from valid plate denominations',
   assert.equal(state.totalIncrement([{ kg: 5 }, { kg: 2.5 }], 2), 5);
   assert.equal(state.totalIncrement([{ kg: 5 }, { kg: 2.5 }], 1), 2.5);
   assert.equal(state.totalIncrement([{ kg: 1.3 }, { kg: 2.5 }], 2), 5);
+});
+
+test('the displayed increment ignores denominations with no available stock', () => {
+  assert.equal(state.totalIncrement(plates, 2, [1, 0, 0, 0, 0, 0, 0]), 50);
+  assert.equal(state.totalIncrement(plates, 1, [1, 0, 0, 0, 0, 0, 0]), 25);
+  assert.equal(state.totalIncrement(plates, 2, plates.map(() => 0)), 0);
 });
 
 test('warm-ups use the derived increment for the selected sidedness', () => {

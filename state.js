@@ -2,7 +2,7 @@
 
 // Pure input, URL-state and presentation-math helpers shared by the app and tests.
 function buildStateLib() {
-  const KNOWN_KEYS = new Set(['w', 'm', 's', 'b', 'i', 'o', 'x', 'c']);
+  const KNOWN_KEYS = new Set(['w', 'm', 's', 'b', 'i', 'o', 'x', 'c', 'p']);
   const DECIMAL = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/;
   const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
 
@@ -20,6 +20,20 @@ function buildStateLib() {
     return Math.max(min, Math.min(max, Math.trunc(finite)));
   }
 
+  function parseStockVector(value, length = 7, maximum = 6) {
+    const parts = Array.isArray(value) ? value : String(value ?? '').split('.');
+    if (parts.length !== length) return null;
+
+    const stock = [];
+    for (const count of parts) {
+      if (typeof count === 'string' && !/^\d+$/.test(count)) return null;
+      const number = Number(count);
+      if (!Number.isInteger(number) || number < 0 || number > maximum) return null;
+      stock.push(number);
+    }
+    return stock;
+  }
+
   function plateKg(plate) {
     return Number(typeof plate === 'number' ? plate : plate && plate.kg);
   }
@@ -33,12 +47,14 @@ function buildStateLib() {
 
   // Derive the actual total-weight lattice from the available denominations
   // rather than assuming theoretical 0.25 kg plates exist.
-  function totalIncrement(plates, sided = 2) {
+  function totalIncrement(plates, sided = 2, maxima = null) {
     const sideCount = sided === 1 ? 1 : 2;
-    const units = (Array.isArray(plates) ? plates : [])
+    const safePlates = Array.isArray(plates) ? plates : [];
+    const stock = Array.isArray(maxima) ? normaliseStock(safePlates, maxima) : null;
+    const units = safePlates
       .map(quarterUnits)
-      .filter((unit) => unit > 0);
-    if (units.length === 0) return sideCount * 1.25;
+      .filter((unit, index) => unit > 0 && (!stock || stock[index] > 0));
+    if (units.length === 0) return stock ? 0 : sideCount * 1.25;
     const unitGcd = units.reduce((result, unit) => gcd(result, unit));
     return Number(((unitGcd * sideCount) / 4).toFixed(6));
   }
@@ -216,7 +232,17 @@ function buildStateLib() {
       ? options.maxSets : 50;
     const maxKg = Number.isFinite(options.maxKg) && options.maxKg >= 0
       ? options.maxKg : 1000;
-    const tokens = String(text ?? '').split(/[\s,;]+/).filter(Boolean);
+    const maxChars = Number.isInteger(options.maxChars) && options.maxChars > 0
+      ? options.maxChars : Infinity;
+    const source = String(text ?? '');
+    if (source.length > maxChars) {
+      return {
+        weights: [],
+        errors: [`Enter no more than ${maxChars} characters (found ${source.length}).`],
+        tokenCount: 0,
+      };
+    }
+    const tokens = source.split(/[\s,;]+/).filter(Boolean);
     const errors = [];
     const weights = [];
 
@@ -273,6 +299,7 @@ function buildStateLib() {
       monotonic: false,
       oneSided: false,
       compact: false,
+      customStock: null,
     };
 
     if (hasOwn(params, 'w')) {
@@ -299,6 +326,7 @@ function buildStateLib() {
     state.monotonic = params.o === '1';
     state.oneSided = params.x === '1';
     state.compact = params.c === '1';
+    if (hasOwn(params, 'p')) state.customStock = parseStockVector(params.p);
 
     return state;
   }
@@ -312,6 +340,7 @@ function buildStateLib() {
     maxTotalWeight,
     minTotalWeight,
     parseWeightInput,
+    parseStockVector,
     parseHash,
     stateFromHash,
     totalIncrement,
