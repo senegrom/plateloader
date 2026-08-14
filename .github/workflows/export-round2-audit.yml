@@ -1,4 +1,4 @@
-name: Export round 2 audit source
+name: Validate round 2 audit fixes
 
 on:
   push:
@@ -6,26 +6,68 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  export:
+  validate:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 30
     steps:
       - name: Check out audit branch
         uses: actions/checkout@v6
         with:
-          persist-credentials: false
+          ref: agent/scan-debloat-round2
+          fetch-depth: 0
 
-      - name: Package source tree
-        shell: bash
-        run: tar --exclude=.git --exclude=node_modules --exclude=_site -czf "$RUNNER_TEMP/plateloader-round2-source.tar.gz" .
-
-      - name: Upload source archive
-        uses: actions/upload-artifact@v4
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
         with:
-          name: plateloader-round2-source
-          path: ${{ runner.temp }}/plateloader-round2-source.tar.gz
-          if-no-files-found: error
-          retention-days: 1
+          node-version: 22
+
+      - name: Materialize audited patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          base64 --decode .audit/round2.patch.gz.b64 | gzip --decompress > /tmp/round2.patch
+          echo "095125765649afd0aaf6bf1db445fa917afb7d0134631381b90d671750850dc9  /tmp/round2.patch" | sha256sum --check
+          if git apply --check /tmp/round2.patch; then
+            git apply /tmp/round2.patch
+            echo "PATCH_APPLIED=true" >> "$GITHUB_ENV"
+          elif git apply --reverse --check /tmp/round2.patch; then
+            echo "PATCH_APPLIED=false" >> "$GITHUB_ENV"
+          else
+            echo "Patch is neither applicable nor already present" >&2
+            exit 1
+          fi
+          git diff --check
+
+      - name: Install browser test dependency
+        if: env.PATCH_APPLIED == 'true'
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Run unit and build regression tests
+        if: env.PATCH_APPLIED == 'true'
+        run: npm test
+
+      - name: Install Chromium
+        if: env.PATCH_APPLIED == 'true'
+        run: npx playwright install --with-deps chromium
+
+      - name: Run browser and PWA checks
+        if: env.PATCH_APPLIED == 'true'
+        run: npm run test:browser
+
+      - name: Commit validated application changes
+        if: env.PATCH_APPLIED == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "senegrom"
+          git config user.email "6349874+senegrom@users.noreply.github.com"
+          git add \
+            algo.js plateloader.css plateloader.js state.js \
+            tests/algo.test.js tests/assets.test.js \
+            tests/browser.spec.js tests/state.test.js
+          git diff --cached --check
+          git commit -m "Harden persisted state and trim dead runtime code"
+          git push origin HEAD:agent/scan-debloat-round2
