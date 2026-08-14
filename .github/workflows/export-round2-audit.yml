@@ -1,0 +1,31 @@
+name: Export round 2 audit source
+
+on:
+  push:
+    branches: [agent/scan-debloat-round2]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out audit branch
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Package source tree
+        shell: bash
+        run: tar --exclude=.git --exclude=node_modules --exclude=_site -czf "$RUNNER_TEMP/plateloader-round2-source.tar.gz" .
+
+      - name: Upload source archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: plateloader-round2-source
+          path: ${{ runner.temp }}/plateloader-round2-source.tar.gz
+          if-no-files-found: error
+          retention-days: 1
