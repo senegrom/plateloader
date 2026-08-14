@@ -330,6 +330,22 @@ test('a pinned starting stack remains ordered and can exceed the selected stock 
   assert.deepEqual(results[1].stack, [1]);
 });
 
+test('sparse membership remains exact for very large direct-API stock caps', () => {
+  const results = algo.optimize(
+    [2.5, 1.25],
+    'count',
+    [32_000_000],
+    [{ kg: 1.25, label: '1.25' }],
+    0,
+    null,
+    false,
+    1,
+  );
+
+  assert.deepEqual(results.map((result) => result.stack), [[0, 0], [0]]);
+  assert.deepEqual(resultObjective(results, 'count'), [4, 5]);
+});
+
 test('mixed-radix state encoding remains exact beyond fifteen plates of one type', () => {
   const results = algo.optimize(
     [18.75, 20],

@@ -529,8 +529,7 @@ function normaliseStack(arr) {
   if (!Array.isArray(arr) || arr.length === 0 || arr.length > START_MAX_TOTAL) return null;
   const out = [];
   const counts = new Array(PLATES.length).fill(0);
-  for (const v of arr) {
-    const n = Number(v);
+  for (const n of arr) {
     if (!Number.isInteger(n) || n < 0 || n >= PLATES.length) return null;
     if (++counts[n] > START_MAX_PER_TYPE) return null;
     out.push(n);
@@ -900,8 +899,12 @@ function updateWarmupConstraints() {
 const generateWarmup = (targetKg) => stateLib.generateWarmup(targetKg, warmupOptions());
 
 // ---------- state persistence (localStorage + URL hash) ----------
+const sharedInput = () => stateLib
+  .normaliseSharedText(inputEl.value, MAX_INPUT_CHARS)
+  .replace(/\r\n?/g, '\n');
+
 const snapshotState = () => ({
-  input:      inputEl.value.slice(0, MAX_INPUT_CHARS),
+  input:      sharedInput(),
   mode:       CURRENT_MODE,
   stock:      stockPreset,
   customStock: customStock ? customStock.slice() : null,
@@ -923,7 +926,7 @@ function applyState(state) {
   // persistence and sharing still cap the stored value.
   inputEl.value = input;
   setMode(['count', 'kg', 'sqrt'].includes(next.mode) ? next.mode : DEFAULT_MODE);
-  setStock(next.stock);
+  setStock(Number.isInteger(next.stock) ? next.stock : DEFAULT_STOCK);
   setCustomStock(next.customStock);
   setBar(Number.isFinite(next.bar) ? next.bar : DEFAULT_BAR);
   setOneSided(next.oneSided === true);
@@ -943,7 +946,7 @@ function loadStateFromStorage() {
 }
 
 function serializeHash() {
-  const input = inputEl.value.slice(0, MAX_INPUT_CHARS).replace(/\r\n?/g, '\n');
+  const input = sharedInput();
   const parts = [];
   if (input) parts.push('w=' + encodeURIComponent(input));
   if (CURRENT_MODE !== DEFAULT_MODE) parts.push('m=' + CURRENT_MODE);

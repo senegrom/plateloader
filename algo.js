@@ -158,31 +158,27 @@ function buildAlgoLib() {
         const keys = new Set();
         return {
           add(key) {
-            const previousSize = keys.size;
+            if (keys.has(key)) return false;
             keys.add(key);
-            return keys.size !== previousSize;
+            return true;
           },
           has: (key) => keys.has(key),
-          get size() { return keys.size; },
         };
       }
 
       const words = new Uint32Array(Math.ceil(stateCount / 32));
-      let size = 0;
       return {
         add(key) {
           const wordIndex = Math.floor(key / 32);
           const mask = 1 << (key & 31);
           if ((words[wordIndex] & mask) !== 0) return false;
           words[wordIndex] |= mask;
-          size++;
           return true;
         },
         has(key) {
           const wordIndex = Math.floor(key / 32);
           return (words[wordIndex] & (1 << (key & 31))) !== 0;
         },
-        get size() { return size; },
       };
     }
 

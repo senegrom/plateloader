@@ -162,6 +162,10 @@ test('assets stay compact without pinning replaceable byte hashes', () => {
   const fontPayloads = fontNames.map((name) => fs.readFileSync(path.join(root, 'fonts', name)));
   assert.equal(new Set(fontPayloads.map(sha256)).size, fontPayloads.length);
   assert.ok(fontPayloads.reduce((sum, bytes) => sum + bytes.length, 0) < 100_000);
+
+  const css = read('plateloader.css');
+  assert.equal((css.match(/@font-face\s*\{[^}]*font-family: 'Inter'/g) || []).length, 1);
+  assert.equal((css.match(/@font-face\s*\{[^}]*font-family: 'JetBrains Mono'/g) || []).length, 1);
 });
 
 test('CI tests both desktop platforms, builds once and deploys that artifact', () => {
