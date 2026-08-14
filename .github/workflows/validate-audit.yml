@@ -44,8 +44,6 @@ jobs:
           git apply --check /tmp/audit.patch
           git apply /tmp/audit.patch
           rm -rf .audit
-          rm -f .github/workflows/export-audit.yml
-          rm -f .github/workflows/validate-audit.yml
           git diff --check
 
       - name: Install and lock browser dependency
@@ -60,7 +58,7 @@ jobs:
       - name: Run browser and PWA checks
         run: npm run test:browser
 
-      - name: Commit validated source tree
+      - name: Commit validated application tree
         shell: bash
         run: |
           set -euo pipefail
@@ -71,6 +69,9 @@ jobs:
               path = Path(name)
               path.write_text(path.read_text().rstrip('\n') + '\n')
           PY
+          # GitHub Actions cannot push workflow-file changes with its token.
+          # The tested Pages workflow is promoted separately through the GitHub API.
+          git restore --source=HEAD -- .github/workflows/pages.yml
           git config user.name "senegrom"
           git config user.email "6349874+senegrom@users.noreply.github.com"
           git add -A
