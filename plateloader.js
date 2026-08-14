@@ -148,9 +148,11 @@ const esc = (s) => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','
 
 const MAX_TOTAL_KG = 1000;
 const MAX_SETS = 50;
+const MAX_INPUT_CHARS = 4096;
 const readInput = () => stateLib.parseWeightInput(inputEl.value, {
   maxSets: MAX_SETS,
   maxKg: MAX_TOTAL_KG,
+  maxChars: MAX_INPUT_CHARS,
 });
 const outputStatusEl = $('outputStatus');
 let statusAnnouncementId = 0;
@@ -163,7 +165,12 @@ function announceStatus(message) {
   });
 }
 
+function setResultsBusy(busy) {
+  resultsEl.setAttribute('aria-busy', busy ? 'true' : 'false');
+}
+
 function renderInputErrors(errors) {
+  setResultsBusy(false);
   const visible = errors.slice(0, 5);
   const remaining = errors.length - visible.length;
   inputEl.setAttribute('aria-invalid', 'true');
@@ -182,6 +189,7 @@ function clearInputErrorState() {
 }
 
 function renderComputeError(error) {
+  setResultsBusy(false);
   clearIndicator();
   inflightReqId = null;
   const message = 'Could not compute this sequence. Check the settings and try again.';
@@ -291,7 +299,7 @@ function renderResults(results, hasStart) {
 
   for (const r of results) {
     const isStartingState = r.valid && hasStart && physicalIndex === 0;
-    const card = document.createElement('div');
+    const card = document.createElement('article');
     card.className = 'set' + (r.valid ? '' : ' invalid') + (isStartingState ? ' starting' : '');
 
     if (!r.valid) {
@@ -302,6 +310,7 @@ function renderResults(results, hasStart) {
           <div class="set-changes"><span class="delta many">invalid</span></div>
         </div>
         <div class="invalid-msg">${esc(r.reason)}<span class="skip-note">Skipped; this entry does not change the bar, so valid sets remain optimised together.</span></div>`;
+      card.setAttribute('aria-label', `Set ${setNum}: ${r.total} kg, invalid`);
       fragment.appendChild(card);
       continue;
     }
@@ -331,6 +340,9 @@ function renderResults(results, hasStart) {
       </div>
       ${renderBar(r.stack, fromStack, { animateChanges: !isStartingState })}
       <div class="plate-list">${plateChips(r.stack)}${oneSided ? '' : ' <span class="scope-note">· per side</span>'}</div>`;
+    card.setAttribute('aria-label', isStartingState
+      ? `Starting load: ${r.total} kg`
+      : `Set ${setNum}: ${r.total} kg`);
     fragment.appendChild(card);
     previousStack = r.stack;
     physicalIndex++;
@@ -347,8 +359,9 @@ function renderResults(results, hasStart) {
     totalMoves += cleanupData.bothSidesMoves;
     totalKg += cleanupData.bothSidesKg;
     totalSqrt += cleanupData.bothSidesSqrtKg;
-    const cleanup = document.createElement('div');
+    const cleanup = document.createElement('article');
     cleanup.className = 'set cleanup';
+    cleanup.setAttribute('aria-label', 'Unload the bar');
     const kgDetail = (CURRENT_MODE === 'kg' || CURRENT_MODE === 'sqrt')
       ? ` <span class="kg-detail">${fmtKg(cleanupData.bothSidesKg)} kg</span>` : '';
     cleanup.innerHTML = `
@@ -382,6 +395,7 @@ function renderResults(results, hasStart) {
   const invalidLabel = invalidSets
     ? `; ${invalidSets} invalid set${invalidSets === 1 ? '' : 's'}`
     : '';
+  setResultsBusy(false);
   announceStatus(`Results updated: ${validLabel}${invalidLabel}.`);
 }
 
@@ -413,6 +427,12 @@ const startRemoveBtn = $('startRemove');
 const monotonicToggle = $('monotonicToggle');
 const oneSidedToggle  = $('oneSidedToggle');
 const constraintNoticeEl = $('constraintNotice');
+const customStockDetails = $('customStockDetails');
+const customStockToggle = $('customStockToggle');
+const customStockInputsEl = $('customStockInputs');
+const customStockSummary = $('customStockSummary');
+const skipLink = $('skipToResults');
+const resultsEl = $('results');
 const modesEl = $('modes');
 const modeButtons = Array.from(modesEl.querySelectorAll('.mode-btn'));
 let monotonic = false;
@@ -427,6 +447,9 @@ const STOCK_MAX     = parseInt(stockSlider.max, 10) || 6;
 const DEFAULT_STOCK = parseInt(stockSlider.defaultValue || stockSlider.value, 10);
 const DEFAULT_MODE  = 'count';
 let CURRENT_MODE = DEFAULT_MODE;
+let stockPreset = DEFAULT_STOCK;
+let customStock = null;
+let customStockInputEls = [];
 const DEFAULT_STATE = Object.freeze({
   input: '',
   mode: DEFAULT_MODE,
@@ -436,7 +459,65 @@ const DEFAULT_STATE = Object.freeze({
   monotonic: false,
   oneSided: false,
   compact: false,
+  customStock: null,
 });
+
+function buildCustomStockInputs() {
+  customStockInputsEl.innerHTML = PLATES.map((plate, index) => `
+    <label class="custom-stock-item" for="customStock-${index}">
+      <span class="swatch ${plate.cls}" aria-hidden="true"></span>
+      <span>${plate.label} kg</span>
+      <input type="number" id="customStock-${index}" data-stock-index="${index}"
+        min="0" max="${STOCK_MAX}" step="1" inputmode="numeric" value="${stockPreset}" />
+    </label>`).join('');
+  customStockInputEls = Array.from(customStockInputsEl.querySelectorAll('input'));
+}
+
+function sameStockVector(left, right) {
+  if (left === right) return true;
+  if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return false;
+  return left.every((count, index) => count === right[index]);
+}
+
+function updateCustomStockControls() {
+  const enabled = Array.isArray(customStock);
+  customStockToggle.checked = enabled;
+  stockSlider.disabled = enabled;
+  customStockInputsEl.setAttribute('aria-disabled', enabled ? 'false' : 'true');
+  customStockInputEls.forEach((input, index) => {
+    input.disabled = !enabled;
+    input.value = String(enabled ? customStock[index] : stockPreset);
+  });
+  customStockSummary.textContent = enabled ? 'On' : 'Off';
+  if (enabled) customStockDetails.open = true;
+}
+
+function setCustomStock(value) {
+  const next = stateLib.parseStockVector(value, PLATES.length, STOCK_MAX);
+  const changed = !sameStockVector(next, customStock);
+  customStock = next;
+  plateMax = next ? next.slice() : new Array(PLATES.length).fill(stockPreset);
+  updateCustomStockControls();
+  updateWarmupConstraints();
+  return changed;
+}
+
+function updateCustomStockCount(index, value) {
+  if (!customStock || !Number.isInteger(index) || index < 0 || index >= customStock.length) {
+    return false;
+  }
+  const source = String(value ?? '').trim();
+  const count = /^\d+$/.test(source)
+    ? stateLib.clampInteger(source, 0, STOCK_MAX, customStock[index])
+    : customStock[index];
+  if (customStock[index] === count) return false;
+  const next = customStock.slice();
+  next[index] = count;
+  customStock = next;
+  plateMax = customStock.slice();
+  updateWarmupConstraints();
+  return true;
+}
 
 // startStack is an ORDERED list of plate indices, innermost → outermost.
 // Validates an array and keeps crafted URL/local-storage values within a
@@ -539,7 +620,7 @@ function setOneSided(on) {
   oneSidedToggle.checked = oneSided;
   // Keep the static two-sided-worded copy honest in one-sided mode.
   const stockLbl = $('stockScopeLabel');
-  if (stockLbl) stockLbl.textContent = oneSided ? 'max of each' : 'max per side';
+  if (stockLbl) stockLbl.textContent = oneSided ? 'total of each' : 'max per side';
   const loadLbl = $('loadScopeLabel');
   if (loadLbl) loadLbl.textContent = oneSided ? 'on one side only' : 'symmetrically';
   updateWarmupConstraints();
@@ -650,11 +731,13 @@ function setMode(m) {
 
 function setStock(value) {
   const stock = stateLib.clampInteger(value, 0, STOCK_MAX, DEFAULT_STOCK);
-  const changed = stock !== plateMax[0];
-  stockSlider.style.setProperty('--fill', (stock * 100 / STOCK_MAX) + '%');
+  const changed = stock !== stockPreset;
+  stockPreset = stock;
+  stockSlider.dataset.stock = String(stock);
   stockSlider.value = String(stock);
   stockValue.textContent = String(stock);
-  plateMax.fill(stock);
+  if (!customStock) plateMax.fill(stock);
+  updateCustomStockControls();
   updateWarmupConstraints();
   return changed;
 }
@@ -682,6 +765,7 @@ function compute(forceSync) {
   if (document.visibilityState === 'hidden') {
     ++currentReqId;
     pendingCompute = true;
+    setResultsBusy(false);
     return;
   }
   const reqId = ++currentReqId;
@@ -695,12 +779,14 @@ function compute(forceSync) {
   }
   clearInputErrorState();
   if (weights.length === 0) {
+    setResultsBusy(false);
     out.innerHTML = '<div class="panel empty-state">Enter some weights above.</div>';
     summaryPanel.hidden = true;
     announceStatus('No sets entered.');
     return;
   }
 
+  setResultsBusy(true);
   const showIndicator = () => {
     if (currentReqId !== reqId) return;
     out.innerHTML = '<div class="panel computing-indicator">Computing…</div>';
@@ -765,7 +851,7 @@ function compute(forceSync) {
 
 // ---------- warmup generator ----------
 // 50/70/85/95/100%, projected onto weights achievable with current stock.
-const warmupIncrement = () => stateLib.totalIncrement(PLATES, sided());
+const warmupIncrement = () => stateLib.totalIncrement(PLATES, sided(), effectivePlateMax());
 
 function effectivePlateMax() {
   const maxima = plateMax.slice();
@@ -803,8 +889,10 @@ function updateWarmupConstraints() {
   }
   if (button) button.disabled = !enabled;
   if (note) {
+    const increment = warmupIncrement();
+    const step = increment > 0 ? `${fmtKg(increment)} kg` : 'no additional plates';
     note.textContent = enabled
-      ? `Will create loadable sets at or below 50%, 70%, 85% and 95%, plus the exact 100% target (smallest denomination step ${fmtKg(warmupIncrement())} kg; maximum ${fmtKg(maximum)} kg).`
+      ? `Will create loadable sets at or below 50%, 70%, 85% and 95%, plus the exact 100% target (available denominations use ${step} total increments; maximum ${fmtKg(maximum)} kg).`
       : 'No positive load is possible with the selected bar and available plates.';
   }
 }
@@ -813,9 +901,10 @@ const generateWarmup = (targetKg) => stateLib.generateWarmup(targetKg, warmupOpt
 
 // ---------- state persistence (localStorage + URL hash) ----------
 const snapshotState = () => ({
-  input:      inputEl.value,
+  input:      inputEl.value.slice(0, MAX_INPUT_CHARS),
   mode:       CURRENT_MODE,
-  stock:      parseInt(stockSlider.value, 10),
+  stock:      stockPreset,
+  customStock: customStock ? customStock.slice() : null,
   bar:        BAR,
   startStack: startStack,
   monotonic:  monotonic,
@@ -829,9 +918,13 @@ const saveState = () => {
 
 function applyState(state) {
   const next = state && typeof state === 'object' ? state : DEFAULT_STATE;
-  inputEl.value = typeof next.input === 'string' ? next.input : DEFAULT_STATE.input;
+  const input = typeof next.input === 'string' ? next.input : DEFAULT_STATE.input;
+  // Preserve crafted state long enough for the input validator to report it;
+  // persistence and sharing still cap the stored value.
+  inputEl.value = input;
   setMode(['count', 'kg', 'sqrt'].includes(next.mode) ? next.mode : DEFAULT_MODE);
   setStock(next.stock);
+  setCustomStock(next.customStock);
   setBar(Number.isFinite(next.bar) ? next.bar : DEFAULT_BAR);
   setOneSided(next.oneSided === true);
   setMonotonic(false);  // clear the previous state's constraint before restoring order
@@ -850,12 +943,12 @@ function loadStateFromStorage() {
 }
 
 function serializeHash() {
-  const input = inputEl.value.replace(/\r\n?/g, '\n');
+  const input = inputEl.value.slice(0, MAX_INPUT_CHARS).replace(/\r\n?/g, '\n');
   const parts = [];
   if (input) parts.push('w=' + encodeURIComponent(input));
   if (CURRENT_MODE !== DEFAULT_MODE) parts.push('m=' + CURRENT_MODE);
-  const stock = parseInt(stockSlider.value, 10);
-  if (stock !== DEFAULT_STOCK) parts.push('s=' + stock);
+  if (stockPreset !== DEFAULT_STOCK) parts.push('s=' + stockPreset);
+  if (customStock) parts.push('p=' + customStock.join('.'));
   if (BAR !== DEFAULT_BAR) parts.push('b=' + BAR);
   // Starting stack: list of plate indices, e.g. i=1.4.1 for 20kg,5kg,20kg.
   if (startStack && startStack.length) parts.push('i=' + startStack.join('.'));
@@ -917,6 +1010,31 @@ stockSlider.addEventListener('input', () => {
   if (!setStock(parseInt(stockSlider.value, 10))) return;
   schedulePersist();
   if (inputEl.value.trim()) scheduleCompute();
+});
+
+customStockToggle.addEventListener('change', () => {
+  const values = customStockToggle.checked
+    ? customStockInputEls.map((input) => input.value)
+    : null;
+  if (setCustomStock(values)) persistAndRecompute();
+});
+
+customStockInputsEl.addEventListener('input', (event) => {
+  const input = event.target.closest('[data-stock-index]');
+  if (!input || !customStock || input.value === '' || !/^\d+$/.test(input.value)) return;
+  const index = Number(input.dataset.stockIndex);
+  if (!updateCustomStockCount(index, input.value)) return;
+  input.value = String(customStock[index]);
+  schedulePersist();
+  if (inputEl.value.trim()) scheduleCompute();
+});
+customStockInputsEl.addEventListener('change', (event) => {
+  const input = event.target.closest('[data-stock-index]');
+  if (!input || !customStock) return;
+  const index = Number(input.dataset.stockIndex);
+  const changed = updateCustomStockCount(index, input.value);
+  input.value = String(customStock[index]);
+  if (changed) persistAndRecompute();
 });
 
 barSelect.addEventListener('change', () => { setBar(barSelect.value); persistAndRecompute(); });
@@ -1052,15 +1170,22 @@ $('warmupCancel').addEventListener('click', closeWarmupDialog);
 
 // Copy shareable link
 const shareBtn = $('shareBtn');
+const shareStatusEl = $('shareStatus');
 const SHARE_DEFAULT_LABEL = shareBtn.textContent;
 let shareFeedbackTimer = null;
 let copyAttemptId = 0;
+let shareAnnouncementId = 0;
 
-function showShareFeedback(label, className) {
+function showShareFeedback(label, className, announcement) {
   if (shareFeedbackTimer !== null) clearTimeout(shareFeedbackTimer);
   shareBtn.textContent = label;
   shareBtn.classList.remove('copied', 'copy-failed');
   shareBtn.classList.add(className);
+  const announcementId = ++shareAnnouncementId;
+  shareStatusEl.textContent = '';
+  requestAnimationFrame(() => {
+    if (announcementId === shareAnnouncementId) shareStatusEl.textContent = announcement;
+  });
   shareFeedbackTimer = setTimeout(() => {
     shareBtn.textContent = SHARE_DEFAULT_LABEL;
     shareBtn.classList.remove('copied', 'copy-failed');
@@ -1108,7 +1233,17 @@ shareBtn.addEventListener('click', async () => {
   shareUrl.hash = serializeHash() || '#w=';  // explicit defaults; never inherit recipient storage
   const copied = await copyText(shareUrl.href);
   if (attemptId !== copyAttemptId) return;
-  showShareFeedback(copied ? 'Copied!' : 'Copy failed', copied ? 'copied' : 'copy-failed');
+  showShareFeedback(
+    copied ? 'Copied!' : 'Copy failed',
+    copied ? 'copied' : 'copy-failed',
+    copied ? 'Shareable link copied.' : 'Could not copy the shareable link.',
+  );
+});
+
+skipLink.addEventListener('click', (event) => {
+  event.preventDefault();
+  try { resultsEl.focus({ preventScroll: true }); } catch (_) { resultsEl.focus(); }
+  resultsEl.scrollIntoView({ block: 'start' });
 });
 
 // Platform-correct keyboard shortcut labels
@@ -1126,6 +1261,7 @@ document.addEventListener('keydown', (e) => {
 });
 
 // Build dynamic UI before restoring state.
+buildCustomStockInputs();
 buildStartButtons();
 renderStartViz();
 updateStartTotalDisplay();

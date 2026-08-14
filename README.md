@@ -4,7 +4,7 @@ Plate Loader finds an exact, globally optimal sequence of plate stacks for a lis
 
 ## Optimisation semantics
 
-The available plates are 25, 20, 15, 10, 5, 2.5 and 1.25 kg. Stock is specified per side for symmetric loading and as a total count for one-sided loading.
+The available plates are 25, 20, 15, 10, 5, 2.5 and 1.25 kg. A simple preset applies one available count to every denomination; an optional custom-stock panel can override each denomination individually. Stock is specified per side for symmetric loading and as a total count for one-sided loading.
 
 The optimiser preserves the longest common inner stack between consecutive valid sets and minimises one of three lexicographic objectives:
 
@@ -16,7 +16,7 @@ Invalid entries remain visible but are skipped as physical states, so valid sets
 
 ## Exactness and limits
 
-The dynamic programme is exhaustive: it does not use a heuristic or complexity guard. The browser UI supports up to 50 sets, six of each plate type, total weights up to 1,000 kg, optional one-sided loading, monotonic stacks and an ordered pinned starting stack.
+The dynamic programme is exhaustive: it does not use a heuristic or complexity guard. The browser UI supports up to 50 sets, up to 4,096 input characters, up to six plates of each denomination, total weights up to 1,000 kg, optional one-sided loading, monotonic stacks and an ordered pinned starting stack.
 
 Plate-count vectors use collision-free mixed-radix state encoding. Dense state spaces use compact membership bitsets; larger direct-API calls retain an exact sparse representation. Repeated set weights share feasibility data, and impossible inventory branches are pruned without changing the search space or result.
 
@@ -30,11 +30,16 @@ Monotonic mode preserves the declared physical starting-stack order. An incompat
 
 ```sh
 npm test
-npm run build
+npm install
+npm run test:browser
 ```
+
+The dependency-free Node suite covers the exact optimiser, state handling, worker and service-worker behavior, and deterministic build boundaries. The Playwright smoke suite exercises the built app under the exact `/plateloader/` project path, including keyboard navigation, optional custom inventory, shared-state restoration and offline operation. Unit tests run on both Ubuntu and Windows in CI.
 
 The build is deterministic, single-writer, crash-recoverable and atomic. It writes `_site`, copies source assets without ad-hoc HTML/CSS/JavaScript rewriting, injects a content-only service-worker build ID, retries transient Windows rename failures, and leaves all source files readable. App-shell cache generations are immutable and isolated by the exact service-worker registration scope. Runtime cache failures degrade to network loading instead of discarding a successful response.
 
-The worker-first runtime loads the exact optimiser on the main thread only as a fallback. Each distinct font payload is stored once, and committed text files use LF so builds remain reproducible across platforms.
+The worker-first runtime loads the exact optimiser on the main thread only as a fallback. A restrictive same-origin content-security policy keeps scripts, styles, workers, fonts and network requests inside the app. Each distinct font payload is stored once, and committed text files use LF so builds remain reproducible across platforms.
 
 URL state is updated immediately while local storage is coalesced during typing and flushed when the page hides, so rapid reloads retain the latest input.
+
+Optional per-denomination inventory is included in the existing share hash, so links remain self-contained and do not rely on recipient browser storage.

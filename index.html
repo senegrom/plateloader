@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; worker-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'"/>
 <title>Plate Loader — Deadlift sets · Carl Georg Heise</title>
 <meta name="description" content="Plate Loader: enter a sequence of deadlift sets and get the optimal plate arrangement that minimises plate moves between sets. Configurable bar weight, plate stock, and warmup generator."/>
 <meta name="theme-color" content="#0e0f12"/>
@@ -25,7 +26,8 @@
 <link rel="stylesheet" href="plateloader.css"/>
 </head>
 <body>
-<main class="wrap">
+<a class="skip-link" id="skipToResults" href="#results">Skip to results</a>
+<main class="wrap" id="mainContent">
   <header>
     <h1>Plate <span class="accent">Loader</span></h1>
     <div class="sub" id="barSub">Deadlift · 20 kg bar</div>
@@ -34,7 +36,7 @@
 
   <div class="panel config-panel">
     <h2 id="lbl-sets">Sets — total weight in kg</h2>
-    <textarea id="input" rows="5" placeholder="60&#10;80&#10;100&#10;120&#10;140" aria-labelledby="lbl-sets" aria-describedby="hint-sets"></textarea>
+    <textarea id="input" rows="5" maxlength="4096" placeholder="60&#10;80&#10;100&#10;120&#10;140" aria-labelledby="lbl-sets" aria-describedby="hint-sets"></textarea>
     <div class="hint" id="hint-sets">One number per line, comma, semicolon, or space (up to 50 sets). Plates load <span id="loadScopeLabel">symmetrically</span>. Each plate added or removed counts as <code>1 move</code> (a swap = 2 moves).</div>
 
     <div class="config-grid">
@@ -49,19 +51,35 @@
         </select>
       </div>
       <div>
-        <h2 id="lbl-stock">Plate stock — <span id="stockScopeLabel">max per side</span></h2>
+        <h2 id="lbl-stock">Plate stock preset — <span id="stockScopeLabel">max per side</span></h2>
         <div class="stock-row">
-          <input type="range" id="stockSlider" min="0" max="6" step="1" value="2" aria-labelledby="lbl-stock" />
+          <input type="range" id="stockSlider" min="0" max="6" step="1" value="2" data-stock="2" aria-labelledby="lbl-stock" aria-describedby="stockPresetHint" />
           <span class="stock-value"><b id="stockValue">2</b><span class="stock-unit"> of each</span></span>
         </div>
+        <div class="hint" id="stockPresetHint">Sets the same available count for every denomination.</div>
       </div>
-      <details class="start-block" id="startDetails">
+      <details class="config-details" id="customStockDetails">
+        <summary>
+          <span class="disclosure-icon" aria-hidden="true"></span>
+          <span class="start-summary-label">Custom stock by denomination</span>
+          <span id="customStockSummary" class="start-total">Off</span>
+        </summary>
+        <div class="details-body">
+          <label class="constraint-toggle custom-stock-toggle">
+            <input type="checkbox" id="customStockToggle" aria-controls="customStockInputs" />
+            <span>Use individual plate counts</span>
+          </label>
+          <div class="custom-stock-grid" id="customStockInputs" role="group" aria-label="Available plate count by denomination"></div>
+          <div class="hint">Overrides the preset while enabled. Counts are per side for symmetric loading and total for one-sided loading.</div>
+        </div>
+      </details>
+      <details class="config-details" id="startDetails">
         <summary>
           <span class="disclosure-icon" aria-hidden="true"></span>
           <span class="start-summary-label">Bar starts at</span>
           <span id="startTotal" class="start-total" aria-live="polite">20 kg bar only</span>
         </summary>
-        <div class="start-builder" aria-labelledby="lbl-start" aria-describedby="hint-start">
+        <div class="details-body start-builder" aria-labelledby="lbl-start" aria-describedby="hint-start">
           <h2 id="lbl-start" class="visually-hidden">Bar starts at</h2>
           <div class="start-viz" id="startViz" role="img" aria-label="Starting bar configuration"></div>
           <div class="start-buttons" id="startButtons" role="group" aria-label="Starting plate choices"></div>
@@ -105,22 +123,26 @@
       <button type="button" class="btn secondary" id="example">Load example</button>
       <button type="button" class="btn secondary" id="warmup">Generate warmup</button>
       <button type="button" class="btn secondary" id="compactToggle" aria-pressed="false">Compact view</button>
-      <button type="button" class="btn secondary" id="shareBtn" aria-label="Copy shareable link" aria-live="polite">Copy link</button>
+      <button type="button" class="btn secondary" id="shareBtn" aria-label="Copy shareable link">Copy link</button>
       <button type="button" class="btn secondary" id="clear">Clear</button>
     </div>
+    <div id="shareStatus" class="visually-hidden" role="status" aria-live="polite" aria-atomic="true"></div>
     <div class="hint shortcut-hint">
       <kbd id="shortcutKbd">Ctrl+Enter</kbd> compute · <kbd id="shortcutFocusKbd">Ctrl+K</kbd> focus input · auto-computes as you type · URL updates for sharing
     </div>
   </div>
 
-  <div class="panel" id="summaryPanel" hidden>
-    <h2>Summary</h2>
-    <div class="summary" id="summary"></div>
-    <div class="legend" id="legend"></div>
-  </div>
+  <section id="results" class="results-region" aria-labelledby="resultsHeading" aria-busy="false" tabindex="-1">
+    <h2 id="resultsHeading" class="visually-hidden">Results</h2>
+    <section class="panel" id="summaryPanel" aria-labelledby="summaryHeading" hidden>
+      <h2 id="summaryHeading">Summary</h2>
+      <div class="summary" id="summary"></div>
+      <div class="legend" id="legend"></div>
+    </section>
 
-  <div id="outputStatus" class="visually-hidden" role="status" aria-live="polite" aria-atomic="true"></div>
-  <div class="sets" id="output"></div>
+    <div id="outputStatus" class="visually-hidden" role="status" aria-live="polite" aria-atomic="true"></div>
+    <div class="sets" id="output"></div>
+  </section>
 
   <footer>Valid sets are globally optimised across the whole sequence; invalid entries are skipped.</footer>
 </main>
