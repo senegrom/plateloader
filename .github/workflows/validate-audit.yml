@@ -64,6 +64,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          for name in ('playwright.config.js', 'tests/browser.spec.js', 'tests/serve-site.js'):
+              path = Path(name)
+              path.write_text(path.read_text().rstrip('\n') + '\n')
+          PY
           git config user.name "senegrom"
           git config user.email "6349874+senegrom@users.noreply.github.com"
           git add -A
