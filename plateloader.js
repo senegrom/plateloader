@@ -619,7 +619,7 @@ function setOneSided(on) {
   oneSidedToggle.checked = oneSided;
   // Keep the static two-sided-worded copy honest in one-sided mode.
   const stockLbl = $('stockScopeLabel');
-  if (stockLbl) stockLbl.textContent = oneSided ? 'total of each' : 'max per side';
+  if (stockLbl) stockLbl.textContent = oneSided ? 'max of each' : 'max per side';
   const loadLbl = $('loadScopeLabel');
   if (loadLbl) loadLbl.textContent = oneSided ? 'on one side only' : 'symmetrically';
   updateWarmupConstraints();

@@ -202,8 +202,15 @@ function assertPairClose(actual, expected, context) {
     `${context}: secondary ${actual[1]} !== ${expected[1]}`);
 }
 
-function checkAgainstOracle({ weights, stock = 1, startStack = null, monotonic = false, sided = 2 }) {
-  const plateMax = PLATES.map(() => stock);
+function checkAgainstOracle({
+  weights,
+  stock = 1,
+  stockByPlate = null,
+  startStack = null,
+  monotonic = false,
+  sided = 2,
+}) {
+  const plateMax = stockByPlate ? stockByPlate.slice() : PLATES.map(() => stock);
   for (const mode of ['count', 'kg', 'sqrt']) {
     const results = algo.optimize(
       weights.slice(),
@@ -218,7 +225,7 @@ function checkAgainstOracle({ weights, stock = 1, startStack = null, monotonic =
     const actual = resultObjective(results, mode);
     const expected = oracleObjective(weights, mode, plateMax, startStack, monotonic, sided);
     assertPairClose(actual, expected,
-      JSON.stringify({ weights, mode, stock, startStack, monotonic, sided }));
+      JSON.stringify({ weights, mode, plateMax, startStack, monotonic, sided }));
   }
 }
 
@@ -234,6 +241,8 @@ test('selected two-sided, one-sided, monotonic and pinned-start cases match an e
     { weights: [35, 45], startStack: [3, 4], monotonic: true },
     { weights: [60, 61, 80], stock: 2 },
     { weights: [61, 60, 80, 61], stock: 2 },
+    { weights: [20, 60, 80, 100], stockByPlate: [0, 2, 0, 2, 0, 0, 0] },
+    { weights: [20, 40, 60, 80], stockByPlate: [0, 2, 0, 2, 0, 0, 0], sided: 1 },
   ];
   for (const testCase of cases) checkAgainstOracle(testCase);
 });
