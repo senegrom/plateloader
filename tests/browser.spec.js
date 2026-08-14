@@ -79,6 +79,41 @@ test('oversized crafted input is rejected without running the optimiser', async 
   await expect(page.locator('#summaryPanel')).toBeHidden();
 });
 
+test('crafted stored state cannot coerce invalid stock or starting plates', async ({ page }) => {
+  await page.addInitScript(() => {
+    localStorage.setItem('plateLoader.v1', JSON.stringify({
+      input: '60',
+      stock: null,
+      customStock: [null, 1, 2, 3, 4, 5, 6],
+      startStack: [null],
+    }));
+  });
+  await page.goto('./');
+  await expect(page.locator('#stockValue')).toHaveText('2');
+  await expect(page.locator('#customStockToggle')).not.toBeChecked();
+  await expect(page.locator('#startDetails')).not.toHaveAttribute('open', '');
+  await expect(page.locator('#startTotal')).toHaveText('20 kg bar only');
+  await expect(page.locator('#outputStatus')).toContainText('1 valid set');
+});
+
+test('malformed Unicode state is safely shared, stored and validated', async ({ page }) => {
+  const runtimeErrors = collectRuntimeErrors(page);
+  await page.goto('./');
+  await page.evaluate(() => {
+    const input = document.getElementById('input');
+    input.value = `60\n${String.fromCharCode(0xD800)}`;
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+
+  await expect(page.locator('#inputErrors')).toContainText('not a decimal weight');
+  await expect.poll(() => new URL(page.url()).hash).toContain('%EF%BF%BD');
+  await expect.poll(() => page.evaluate(() => {
+    const saved = JSON.parse(localStorage.getItem('plateLoader.v1'));
+    return saved && saved.input;
+  })).toBe('60\n�');
+  expect(runtimeErrors).toEqual([]);
+});
+
 test('custom inventory drives warm-up limits and generated weights', async ({ page }) => {
   await page.goto('./');
   await page.locator('#customStockDetails > summary').click();

@@ -97,6 +97,15 @@ test('input character limits bound crafted values before tokenisation', () => {
   assert.deepEqual(parsed.errors, ['Enter no more than 8 characters (found 9).']);
 });
 
+test('shared text is valid Unicode and never cuts a surrogate pair', () => {
+  const high = String.fromCharCode(0xD800);
+  const low = String.fromCharCode(0xDC00);
+  assert.equal(state.normaliseSharedText(`a${high}b${low}c`), 'a�b�c');
+  assert.equal(state.normaliseSharedText('ab😀cd', 5), 'ab😀c');
+  assert.equal(state.normaliseSharedText('abcd😀', 5), 'abcd');
+  assert.doesNotThrow(() => encodeURIComponent(state.normaliseSharedText(high)));
+});
+
 test('custom stock vectors are exact, bounded and shareable', () => {
   assert.deepEqual(state.parseStockVector('0.1.2.3.4.5.6'), [0, 1, 2, 3, 4, 5, 6]);
   assert.deepEqual(state.parseStockVector([6, 5, 4, 3, 2, 1, 0]), [6, 5, 4, 3, 2, 1, 0]);
@@ -104,6 +113,10 @@ test('custom stock vectors are exact, bounded and shareable', () => {
   assert.equal(state.parseStockVector('0.1.2.3.4.5.7'), null);
   assert.equal(state.parseStockVector('0.1.2.3.4.5.x'), null);
   assert.equal(state.parseStockVector('0.1.2.3.4.5.'), null);
+  assert.equal(state.parseStockVector([null, 1, 2, 3, 4, 5, 6]), null);
+  assert.equal(state.parseStockVector([false, 1, 2, 3, 4, 5, 6]), null);
+  assert.equal(state.parseStockVector(['', 1, 2, 3, 4, 5, 6]), null);
+  assert.equal(state.parseStockVector([{}, 1, 2, 3, 4, 5, 6]), null);
 
   assert.deepEqual(
     state.stateFromHash('#w=60&p=0.1.2.3.4.5.6', defaults).customStock,

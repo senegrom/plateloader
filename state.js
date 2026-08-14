@@ -26,12 +26,52 @@ function buildStateLib() {
 
     const stock = [];
     for (const count of parts) {
-      if (typeof count === 'string' && !/^\d+$/.test(count)) return null;
-      const number = Number(count);
+      let number;
+      if (typeof count === 'number') {
+        number = count;
+      } else if (typeof count === 'string' && /^\d+$/.test(count)) {
+        number = Number(count);
+      } else {
+        return null;
+      }
       if (!Number.isInteger(number) || number < 0 || number > maximum) return null;
       stock.push(number);
     }
     return stock;
+  }
+
+  // URL encoders reject lone UTF-16 surrogates. Normalise crafted browser
+  // state to valid Unicode and avoid cutting a surrogate pair at the limit.
+  function normaliseSharedText(value, maximum = Infinity) {
+    const source = String(value ?? '');
+    const limit = Number.isInteger(maximum) && maximum >= 0 ? maximum : Infinity;
+    let output = '';
+    let length = 0;
+
+    for (let index = 0; index < source.length && length < limit; index++) {
+      const code = source.charCodeAt(index);
+      if (code >= 0xD800 && code <= 0xDBFF) {
+        const next = source.charCodeAt(index + 1);
+        if (next >= 0xDC00 && next <= 0xDFFF) {
+          if (length + 2 > limit) break;
+          output += source[index] + source[index + 1];
+          index++;
+          length += 2;
+          continue;
+        }
+        output += '\uFFFD';
+        length++;
+        continue;
+      }
+      if (code >= 0xDC00 && code <= 0xDFFF) {
+        output += '\uFFFD';
+        length++;
+        continue;
+      }
+      output += source[index];
+      length++;
+    }
+    return output;
   }
 
   function plateKg(plate) {
@@ -339,6 +379,7 @@ function buildStateLib() {
     isMonotonicStack,
     maxTotalWeight,
     minTotalWeight,
+    normaliseSharedText,
     parseWeightInput,
     parseStockVector,
     parseHash,
