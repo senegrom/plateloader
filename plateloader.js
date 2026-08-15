@@ -339,7 +339,7 @@ function renderResults(results, hasStart) {
         <div class="set-changes">${changes}</div>
       </div>
       ${renderBar(r.stack, fromStack, { animateChanges: !isStartingState })}
-      <div class="plate-list">${plateChips(r.stack)}${oneSided ? '' : ' <span class="scope-note">· per side</span>'}</div>`;
+      <div class="plate-list">${plateChips(r.stack)}${oneSided || r.stack.length === 0 ? '' : ' <span class="scope-note">· per side</span>'}</div>`;
     card.setAttribute('aria-label', isStartingState
       ? `Starting load: ${r.total} kg`
       : `Set ${setNum}: ${r.total} kg`);
