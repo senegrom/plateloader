@@ -324,7 +324,9 @@ function buildStateLib() {
 
   // URL state is complete, not an overlay on saved browser state. Fields that
   // are absent from the hash deliberately resolve to the supplied defaults.
-  function stateFromHash(hashOrParams, defaults) {
+  // Callers pass their own denomination bounds in options so the shared
+  // per-plate vector tracks the app's plate list, not this module's defaults.
+  function stateFromHash(hashOrParams, defaults, options = {}) {
     const params = typeof hashOrParams === 'string'
       ? parseHash(hashOrParams)
       : hashOrParams;
@@ -366,7 +368,11 @@ function buildStateLib() {
     state.monotonic = params.o === '1';
     state.oneSided = params.x === '1';
     state.compact = params.c === '1';
-    if (hasOwn(params, 'p')) state.customStock = parseStockVector(params.p);
+    if (hasOwn(params, 'p')) {
+      state.customStock = parseStockVector(
+        params.p, options.stockLength, options.stockMaximum,
+      );
+    }
 
     return state;
   }

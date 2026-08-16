@@ -229,11 +229,12 @@ function buildAlgoLib() {
 
         const unit = units[index];
         const maximum = Math.min(plateMax[index], Math.floor(remaining / unit));
+        // The descending loop always ends at zero, which restores the
+        // "counts are zero from here outward" invariant the callers rely on.
         for (let count = maximum; count >= 0; count--) {
           counts[index] = count;
           enumerate(index + 1, remaining - count * unit);
         }
-        counts[index] = 0;
       }
 
       enumerate(0, targetUnits);
@@ -589,7 +590,18 @@ function buildAlgoLib() {
     return output;
   }
 
-  return { optimize };
+  // optimize() prepends the pinned starting state only when at least one
+  // requested set is valid, so callers detect it from the result length rather
+  // than repeating that rule.
+  function hasPinnedStart(weights, startStack, results) {
+    const requested = Array.isArray(weights) ? weights.length : 0;
+    return Boolean(
+      Array.isArray(startStack) && startStack.length &&
+      Array.isArray(results) && results.length === requested + 1,
+    );
+  }
+
+  return { optimize, hasPinnedStart };
 }
 
 if (typeof module !== 'undefined' && module.exports) {

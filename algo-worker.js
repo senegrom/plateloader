@@ -17,12 +17,7 @@ self.onmessage = function (event) {
       data.monotonic,
       data.sided,
     );
-    const requestedCount = Array.isArray(data.weights) ? data.weights.length : 0;
-    const hasStart = Boolean(
-      Array.isArray(data.startStack) &&
-      data.startStack.length &&
-      results.length === requestedCount + 1
-    );
+    const hasStart = algoLib.hasPinnedStart(data.weights, data.startStack, results);
     self.postMessage({ reqId: data.reqId, hasStart, results });
   } catch (error) {
     self.postMessage({

@@ -23,6 +23,7 @@
 <link rel="manifest" href="manifest.json"/>
 <link rel="preload" href="fonts/Inter-400.woff2" as="font" type="font/woff2" crossorigin/>
 <link rel="preload" href="fonts/BebasNeue-400.woff2" as="font" type="font/woff2" crossorigin/>
+<link rel="preload" href="fonts/JetBrainsMono-400.woff2" as="font" type="font/woff2" crossorigin/>
 <link rel="stylesheet" href="plateloader.css"/>
 </head>
 <body>
@@ -151,7 +152,7 @@
   <form method="dialog" id="warmupForm">
     <h2 id="lbl-warmup">Generate warmup</h2>
     <label for="warmupTarget" class="warmup-label">Target weight (kg)</label>
-    <input type="number" id="warmupTarget" min="20" max="1000" step="any" value="140" required inputmode="decimal" aria-describedby="warmupNote" />
+    <input type="number" id="warmupTarget" step="any" value="140" required inputmode="decimal" aria-describedby="warmupNote" />
     <div class="warmup-note" id="warmupNote">Will create loadable sets at or below 50%, 70%, 85% and 95%, plus the exact 100% target.</div>
     <div class="actions">
       <button type="button" class="btn secondary" id="warmupCancel">Cancel</button>

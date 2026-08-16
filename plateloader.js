@@ -240,7 +240,7 @@ function renderBarRow(stack, prevStack = [], options = {}) {
 
   const accessibility = options.label === false
     ? ''
-    : ` role="img" aria-label="${barDescription(stack)}"`;
+    : ` role="img" aria-label="${esc(barDescription(stack))}"`;
   return `<div class="bar-row"${accessibility}>${leftHtml}<div class="collar"></div><div class="bar"></div><div class="collar"></div>${rightHtml}</div>`;
 }
 
@@ -834,10 +834,10 @@ function compute(forceSync) {
             weights, CURRENT_MODE, plateMax, PLATE_KG, BAR,
             requestedStartStack, monotonic, sided(),
           );
-          const resultHasStart = Boolean(
-            requestedStartStack && results.length === weights.length + 1
+          renderResults(
+            results,
+            library.hasPinnedStart(weights, requestedStartStack, results),
           );
-          renderResults(results, resultHasStart);
         } catch (error) {
           if (currentReqId === reqId) renderComputeError(error);
         }
@@ -962,7 +962,12 @@ function serializeHash() {
 }
 
 function applyHash(hash = location.hash) {
-  const state = stateLib.stateFromHash(hash, DEFAULT_STATE);
+  // The shared per-denomination vector must match this app's plate list, so
+  // pass the live bounds instead of relying on the state library's defaults.
+  const state = stateLib.stateFromHash(hash, DEFAULT_STATE, {
+    stockLength: PLATES.length,
+    stockMaximum: STOCK_MAX,
+  });
   if (!state) return false;
   applyState(state);
   return true;
@@ -970,7 +975,7 @@ function applyHash(hash = location.hash) {
 
 function updateHash() {
   const next = serializeHash();
-  if (next === location.hash || (next === '' && location.hash === '')) return;
+  if (next === location.hash) return;
   try { history.replaceState(null, '', location.pathname + location.search + next); } catch (_) {}
 }
 
@@ -1022,12 +1027,13 @@ customStockToggle.addEventListener('change', () => {
   if (setCustomStock(values)) persistAndRecompute();
 });
 
+// Typing only updates the clamped model. Rewriting the field on every
+// keystroke would move the caret mid-entry, so the displayed value is
+// normalised on change (blur or Enter) instead.
 customStockInputsEl.addEventListener('input', (event) => {
   const input = event.target.closest('[data-stock-index]');
-  if (!input || !customStock || input.value === '' || !/^\d+$/.test(input.value)) return;
-  const index = Number(input.dataset.stockIndex);
-  if (!updateCustomStockCount(index, input.value)) return;
-  input.value = String(customStock[index]);
+  if (!input || !customStock || !/^\d+$/.test(input.value)) return;
+  if (!updateCustomStockCount(Number(input.dataset.stockIndex), input.value)) return;
   schedulePersist();
   if (inputEl.value.trim()) scheduleCompute();
 });

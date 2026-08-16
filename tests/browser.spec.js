@@ -38,7 +38,11 @@ test('primary workflow, bypass navigation and custom stock round-trip', async ({
   await expect(page.locator('#stockSlider')).toBeDisabled();
   await page.locator('#customStock-0').fill('1');
   await expect.poll(() => new URL(page.url()).hash).toContain('p=1.2.2.2.2.2.2');
+  // Out-of-range typing clamps the model immediately without rewriting the
+  // field under the caret; the displayed value is normalised on commit.
   await page.locator('#customStock-1').fill('99');
+  await expect.poll(() => new URL(page.url()).hash).toContain('p=1.6.2.2.2.2.2');
+  await page.locator('#customStock-1').blur();
   await expect(page.locator('#customStock-1')).toHaveValue('6');
   await page.locator('#customStock-1').fill('1.5');
   await page.locator('#customStock-1').blur();
@@ -51,6 +55,17 @@ test('primary workflow, bypass navigation and custom stock round-trip', async ({
   await expect(page.locator('#customStock-1')).toHaveValue('6');
   await expect(page.locator('[data-mode="kg"]')).toHaveAttribute('aria-checked', 'true');
   expect(runtimeErrors).toEqual([]);
+});
+
+// The slider paints its own track, so its `outline: none` ties the shared
+// focus-visible rule on specificity and wins on source order.
+test('the stock slider keeps a visible keyboard focus ring', async ({ page }) => {
+  await page.goto('./');
+  await page.locator('#input').click();
+  await page.keyboard.press('Tab');
+  await page.keyboard.press('Tab');
+  await expect(page.locator('#stockSlider')).toBeFocused();
+  await expect(page.locator('#stockSlider')).toHaveCSS('outline-width', '2px');
 });
 
 test('custom counts reach the exact optimiser and malformed vectors are ignored', async ({ page }) => {
@@ -142,6 +157,22 @@ test('copy feedback has a stable action name and a separate live announcement', 
   await expect(share).toHaveText('Copied!');
   await expect(share).toHaveAttribute('aria-label', 'Copy shareable link');
   await expect(page.locator('#shareStatus')).toHaveText('Shareable link copied.');
+});
+
+// Every other test exercises the worker path; this one covers the sync
+// fallback end to end — the on-demand algo.js script load and the shared
+// pinned-start detection — by removing Worker support before load.
+test('missing Worker support falls back to the exact sync optimiser', async ({ page }) => {
+  const runtimeErrors = collectRuntimeErrors(page);
+  await page.addInitScript(() => {
+    Object.defineProperty(window, 'Worker', { value: undefined });
+  });
+  await page.goto('./#w=60&i=1');
+  await expect(page.locator('#output article.set')).toHaveCount(3);
+  await expect(page.locator('#output .set.starting')).toHaveCount(1);
+  await expect(page.locator('#output .set.cleanup')).toHaveCount(1);
+  await expect(page.locator('#outputStatus')).toContainText('1 valid set');
+  expect(runtimeErrors).toEqual([]);
 });
 
 test('project-scoped service worker keeps the app usable offline', async ({ page, context }) => {
