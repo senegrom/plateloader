@@ -18,7 +18,7 @@ Invalid entries remain visible but are skipped as physical states, so valid sets
 
 The dynamic programme is exhaustive: it does not use a heuristic or complexity guard. The browser UI supports up to 50 sets, up to 4,096 input characters, up to six plates of each denomination, total weights up to 1,000 kg, optional one-sided loading, monotonic stacks and an ordered pinned starting stack.
 
-Plate-count vectors use collision-free mixed-radix state encoding. Dense state spaces use compact membership bitsets; larger direct-API calls retain an exact sparse representation. Repeated set weights share feasibility data, and impossible inventory branches are pruned without changing the search space or result.
+Plate-count vectors use collision-free mixed-radix state encoding. Dense state spaces use compact membership bitsets; larger direct-API calls retain an exact sparse representation. The interval search memoises one all-pairs cost table per prefix and contiguous block of sets, so session-shaped inputs whose sets share long inner stacks optimise in milliseconds instead of tens of seconds. Repeated set weights share feasibility data, and impossible inventory branches are pruned without changing the search space or result.
 
 The starting stack may exceed the selected stock count because those plates are already physically present. Its UI length is bounded to reject implausible crafted URL or local-storage state, not to approximate the optimiser.
 

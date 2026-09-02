@@ -407,6 +407,23 @@ test('inventory irrelevant to every valid target is removed without changing exa
   assert.match(results[1].reason, /available plate denominations/);
 });
 
+// Session-shaped inputs share long inner stacks across many sets. The
+// per-interval formulation re-derived every sub-run from scratch and took
+// 18 s (wave) and 42 s (5x5) here; the block formulation must stay fast
+// while returning the same optimum.
+test('session-shaped inputs with long shared prefixes stay fast and exact', () => {
+  const plateMax = PLATES.map(() => 6);
+  const wave = [60, 80, 100, 120, 130, 140, 150, 160, 150, 140, 160, 170, 150, 130, 110, 90, 70, 60];
+  const fiveByFive = Array.from({ length: 25 }, (_, index) => 100 + 20 * Math.floor(index / 5));
+  for (const [weights, expectedMoves] of [[wave, 56], [fiveByFive, 24]]) {
+    const started = performance.now();
+    const results = algo.optimize(weights, 'count', plateMax, PLATES, BAR, null, false, 2);
+    const elapsed = performance.now() - started;
+    assert.equal(resultObjective(results, 'count')[0], expectedMoves);
+    assert.ok(elapsed < 5000, `${weights.length} sets took ${elapsed.toFixed(0)} ms`);
+  }
+});
+
 test('worker-facing result objects omit derivable and unused payload fields', () => {
   const results = algo.optimize([60, 80], 'count', PLATES.map(() => 2), PLATES, BAR, null, false, 2);
   for (const result of results.filter((entry) => entry.valid)) {

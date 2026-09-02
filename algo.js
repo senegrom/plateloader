@@ -355,28 +355,72 @@ function buildAlgoLib() {
       );
     }
 
-    const intervalBase = activeSets.length + 1;
-    const prefixBase = intervalBase * intervalBase;
-    const maxPackedKey = (stateCount - 1) * prefixBase +
-      (activeSets.length - 1) * intervalBase + activeSets.length - 1;
-    const numericMemoKeys = Number.isSafeInteger(maxPackedKey);
-    const packMemoKey = numericMemoKeys
-      ? (start, end, prefixKey) => prefixKey * prefixBase + start * intervalBase + end
-      : (start, end, prefixKey) => `${prefixKey}|${start}|${end}`;
-
+    // The sets admitting a prefix form contiguous blocks. All-pairs values
+    // F(s, j) = cost of covering sets s..j under the prefix, for every s <= j
+    // in one block, are computed together: child lookups are gathered once
+    // per (plate, run start), and the cubic all-pairs pass then runs over
+    // contiguous typed arrays with exact loop bounds. Candidates are examined
+    // in the original order (stop, then plates ascending, then run start
+    // descending, strict improvement only), so results are identical to the
+    // per-interval formulation. Block records and values live in flat arenas.
     function optimizeRun() {
+      const setCount = activeSets.length;
       const memo = new Map();
-      const emptyResult = { primary: 0, secondary: 0 };
+      const maxTableKey = (stateCount - 1) * setCount + setCount - 1;
+      const packTableKey = Number.isSafeInteger(maxTableKey)
+        ? (start, prefixKey) => prefixKey * setCount + start
+        : (start, prefixKey) => `${prefixKey}|${start}`;
+      const admits = (setIndex, prefixKey) =>
+        activeSets[setIndex].feasibility.prefixKeys.has(prefixKey);
 
-      function evaluate(start, end, prefixKey, prefixUnits, recordChoices) {
-        const length = end - start + 1;
-        const primary = new Float64Array(length + 1);
-        const secondary = new Float64Array(length + 1);
-        primary.fill(Infinity);
-        secondary.fill(Infinity);
-        primary[0] = 0;
-        secondary[0] = 0;
-        const choices = recordChoices ? new Array(length + 1).fill(-2) : null;
+      let blockCount = 0;
+      let blockStart = new Int32Array(1024);
+      let blockLength = new Int32Array(1024);
+      let blockValues = new Int32Array(1024);
+      let blockChoices = new Int32Array(1024);
+      let blockPlates = new Int32Array(1024);
+      let blockPlateCount = new Int32Array(1024);
+      let values = new Float64Array(1 << 12);
+      let valuesUsed = 0;
+      let choices = new Int32Array(1 << 12);
+      let choicesUsed = 0;
+      let plates = new Int32Array(1 << 12);
+      let platesUsed = 0;
+      let scratch = new Float64Array(1 << 10);
+      let runMinimum = new Int32Array(1 << 10);
+      let stops = new Uint8Array(1 << 10);
+
+      const growInt32 = (array, needed) => {
+        if (needed <= array.length) return array;
+        const next = new Int32Array(Math.max(needed, array.length * 2));
+        next.set(array);
+        return next;
+      };
+      const growFloat64 = (array, needed) => {
+        if (needed <= array.length) return array;
+        const next = new Float64Array(Math.max(needed, array.length * 2));
+        next.set(array);
+        return next;
+      };
+
+      // Row i (start s0 + i) holds offsets m = 0..L-i.
+      const rowStart = (L, i) => i * (L + 1) - ((i * (i - 1)) >> 1);
+      const blockTotal = (L) => (L * (L + 3)) >> 1;
+
+      function block(start, prefixKey, prefixUnits) {
+        const cached = memo.get(packTableKey(start, prefixKey));
+        if (cached !== undefined) return cached;
+        let s0 = start;
+        while (s0 > 0 && admits(s0 - 1, prefixKey)) s0--;
+        let end = start;
+        while (end + 1 < setCount && admits(end + 1, prefixKey)) end++;
+        const id = computeBlock(s0, end, prefixKey, prefixUnits);
+        for (let s = s0; s <= end; s++) memo.set(packTableKey(s, prefixKey), id);
+        return id;
+      }
+
+      function computeBlock(s0, end, prefixKey, prefixUnits) {
+        const L = end - s0 + 1;
 
         let largestPlateIndex = -1;
         if (monotonic) {
@@ -387,119 +431,164 @@ function buildAlgoLib() {
             }
           }
         }
-
-        const extensions = [];
+        const extensionPlates = [];
         for (let plateIndex = 0; plateIndex < NP; plateIndex++) {
           if (countAt(prefixKey, plateIndex) >= plateMax[plateIndex]) continue;
           if (monotonic && plateIndex < largestPlateIndex) continue;
-          extensions.push({
-            plateIndex,
-            key: prefixKey + multipliers[plateIndex],
-          });
+          extensionPlates.push(plateIndex);
+        }
+        const extensionCount = extensionPlates.length;
+
+        // Pass 1: make every child block exist. This is the only recursive
+        // step, so the shared scratch buffers below are never in use here.
+        for (let e = 0; e < extensionCount; e++) {
+          const plateIndex = extensionPlates[e];
+          const key = prefixKey + multipliers[plateIndex];
+          const extendedUnits = prefixUnits + units[plateIndex];
+          for (let r = s0; r <= end; r++) {
+            if (admits(r, key)) block(r, key, extendedUnits);
+          }
         }
 
-        for (let setIndex = start; setIndex <= end; setIndex++) {
-          const offset = setIndex - start + 1;
-          const set = activeSets[setIndex];
-
-          const canStop = set.pinnedKey === undefined
-            ? prefixUnits === set.targetUnits
-            : prefixKey === set.pinnedKey;
-          if (canStop) {
-            const previousPrimary = primary[offset - 1];
-            const previousSecondary = secondary[offset - 1];
-            if (
-              previousPrimary < primary[offset] - EPSILON ||
-              (previousPrimary <= primary[offset] + EPSILON &&
-                previousSecondary < secondary[offset] - EPSILON)
-            ) {
-              primary[offset] = previousPrimary;
-              secondary[offset] = previousSecondary;
-              if (choices) choices[offset] = -1;
+        // Pass 2: gather W[e](r, j) = plate cost + child value for the run
+        // r..j under prefix+plate, column-major by j so the inner loop of
+        // pass 3 walks contiguous memory. runMinimum[e][j] is the smallest
+        // admitted run start for that column (j + 1 when j is not admitted).
+        const pairs = (L * (L + 1)) >> 1;
+        const secondaryBase = extensionCount * pairs;
+        scratch = growFloat64(scratch, 2 * secondaryBase);
+        runMinimum = growInt32(runMinimum, extensionCount * L);
+        stops = stops.length >= L ? stops : new Uint8Array(Math.max(L, stops.length * 2));
+        for (let index = 0; index < extensionCount * L; index++) runMinimum[index] = L;
+        for (let e = 0; e < extensionCount; e++) {
+          const plateIndex = extensionPlates[e];
+          const key = prefixKey + multipliers[plateIndex];
+          const primaryCost = primaryPlateCost[plateIndex];
+          const secondaryCost = secondaryPlateCost[plateIndex];
+          const base = e * pairs;
+          for (let r = s0; r <= end; r++) {
+            if (!admits(r, key)) continue;
+            const child = memo.get(packTableKey(r, key));
+            const childStart = blockStart[child];
+            const childLength = blockLength[child];
+            const childRow = blockValues[child] + rowStart(childLength, r - childStart);
+            const childRowSecondary = childRow + blockTotal(childLength);
+            const childEnd = childStart + childLength - 1;
+            if (r === childStart) {
+              for (let j = childStart; j <= childEnd; j++) {
+                runMinimum[e * L + (j - s0)] = childStart - s0;
+              }
+            }
+            for (let j = r; j <= childEnd; j++) {
+              const offset = j - r + 1;
+              const column = j - s0;
+              const index = base + ((column * (column + 1)) >> 1) + (r - s0);
+              scratch[index] = primaryCost + values[childRow + offset];
+              scratch[secondaryBase + index] = secondaryCost + values[childRowSecondary + offset];
             }
           }
+        }
+        for (let i = 0; i < L; i++) {
+          const set = activeSets[s0 + i];
+          stops[i] = (set.pinnedKey === undefined
+            ? prefixUnits === set.targetUnits
+            : prefixKey === set.pinnedKey) ? 1 : 0;
+        }
 
-          for (const extension of extensions) {
-            if (!set.feasibility.prefixKeys.has(extension.key)) continue;
-            for (let runStart = setIndex; runStart >= start; runStart--) {
-              if (
-                runStart < setIndex &&
-                !activeSets[runStart].feasibility.prefixKeys.has(extension.key)
-              ) break;
-
-              const inner = solve(
-                runStart, setIndex, extension.key,
-                prefixUnits + units[extension.plateIndex],
-              );
-              const previousOffset = runStart - start;
-              const candidatePrimary = primary[previousOffset] +
-                primaryPlateCost[extension.plateIndex] + inner.primary;
-              const candidateSecondary = secondary[previousOffset] +
-                secondaryPlateCost[extension.plateIndex] + inner.secondary;
-
-              if (
-                candidatePrimary < primary[offset] - EPSILON ||
-                (candidatePrimary <= primary[offset] + EPSILON &&
-                  candidateSecondary < secondary[offset] - EPSILON)
-              ) {
-                primary[offset] = candidatePrimary;
-                secondary[offset] = candidateSecondary;
-                if (choices) {
-                  choices[offset] = runStart * NP + extension.plateIndex;
+        // Pass 3: all-pairs F over the block in the original candidate order.
+        const total = blockTotal(L);
+        values = growFloat64(values, valuesUsed + 2 * total);
+        choices = growInt32(choices, choicesUsed + total);
+        const valueBase = valuesUsed;
+        const secondaryValueBase = valueBase + total;
+        const choiceBase = choicesUsed;
+        valuesUsed += 2 * total;
+        choicesUsed += total;
+        for (let i = 0; i < L; i++) {
+          const row = valueBase + rowStart(L, i);
+          const rowSecondary = secondaryValueBase + rowStart(L, i);
+          const rowChoice = choiceBase + rowStart(L, i);
+          values[row] = 0;
+          values[rowSecondary] = 0;
+          choices[rowChoice] = -2;
+          for (let j = i; j < L; j++) {
+            const m = j - i + 1;
+            let bestPrimary = Infinity;
+            let bestSecondary = Infinity;
+            let bestChoice = -2;
+            if (stops[j] === 1) {
+              bestPrimary = values[row + m - 1];
+              bestSecondary = values[rowSecondary + m - 1];
+              bestChoice = -1;
+            }
+            const columnBase = (j * (j + 1)) >> 1;
+            for (let e = 0; e < extensionCount; e++) {
+              let low = runMinimum[e * L + j];
+              if (low > j) continue;
+              if (low < i) low = i;
+              const base = e * pairs + columnBase;
+              const baseSecondary = secondaryBase + base;
+              for (let r = j; r >= low; r--) {
+                const totalPrimary = values[row + (r - i)] + scratch[base + r];
+                const totalSecondary = values[rowSecondary + (r - i)] + scratch[baseSecondary + r];
+                if (
+                  totalPrimary < bestPrimary - EPSILON ||
+                  (totalPrimary <= bestPrimary + EPSILON &&
+                    totalSecondary < bestSecondary - EPSILON)
+                ) {
+                  bestPrimary = totalPrimary;
+                  bestSecondary = totalSecondary;
+                  bestChoice = e * L + r;
                 }
               }
             }
+            values[row + m] = bestPrimary;
+            values[rowSecondary + m] = bestSecondary;
+            choices[rowChoice + m] = bestChoice;
           }
         }
 
-        return {
-          primary: primary[length],
-          secondary: secondary[length],
-          choices,
-        };
+        const id = blockCount++;
+        blockStart = growInt32(blockStart, blockCount);
+        blockLength = growInt32(blockLength, blockCount);
+        blockValues = growInt32(blockValues, blockCount);
+        blockChoices = growInt32(blockChoices, blockCount);
+        blockPlates = growInt32(blockPlates, blockCount);
+        blockPlateCount = growInt32(blockPlateCount, blockCount);
+        plates = growInt32(plates, platesUsed + extensionCount);
+        blockStart[id] = s0;
+        blockLength[id] = L;
+        blockValues[id] = valueBase;
+        blockChoices[id] = choiceBase;
+        blockPlates[id] = platesUsed;
+        blockPlateCount[id] = extensionCount;
+        for (let e = 0; e < extensionCount; e++) plates[platesUsed + e] = extensionPlates[e];
+        platesUsed += extensionCount;
+        return id;
       }
 
-      function solve(start, end, prefixKey, prefixUnits) {
-        if (start > end) return emptyResult;
-        const memoKey = packMemoKey(start, end, prefixKey);
-        const cached = memo.get(memoKey);
-        if (cached !== undefined) return cached;
-        const evaluated = evaluate(start, end, prefixKey, prefixUnits, false);
-        const result = {
-          primary: evaluated.primary,
-          secondary: evaluated.secondary,
-        };
-        memo.set(memoKey, result);
-        return result;
-      }
-
-      solve(0, activeSets.length - 1, 0, 0);
-      const stacks = new Array(activeSets.length);
+      block(0, 0, 0);
+      const stacks = new Array(setCount);
 
       function backtrack(start, end, prefixStack, prefixKey, prefixUnits) {
-        if (start > end) return;
-        const entry = memo.get(packMemoKey(start, end, prefixKey));
-        if (!entry) throw new Error('Missing optimiser reconstruction state');
-        const reconstruction = evaluate(start, end, prefixKey, prefixUnits, true);
-        if (
-          Math.abs(reconstruction.primary - entry.primary) > EPSILON ||
-          Math.abs(reconstruction.secondary - entry.secondary) > EPSILON
-        ) throw new Error('Optimiser reconstruction cost changed');
-
+        const id = memo.get(packTableKey(start, prefixKey));
+        if (id === undefined) throw new Error('Missing optimiser reconstruction state');
+        const s0 = blockStart[id];
+        const L = blockLength[id];
+        const choiceRow = blockChoices[id] + rowStart(L, start - s0);
         let setIndex = end;
         while (setIndex >= start) {
-          const offset = setIndex - start + 1;
-          const selection = reconstruction.choices[offset];
-          if (selection === -2) throw new Error('No exact plate arrangement found');
+          const choice = choices[choiceRow + (setIndex - start + 1)];
+          if (choice === -2) throw new Error('No exact plate arrangement found');
 
-          if (selection === -1) {
+          if (choice === -1) {
             stacks[setIndex] = prefixStack.slice();
             setIndex--;
             continue;
           }
 
-          const runStart = Math.floor(selection / NP);
-          const plateIndex = selection % NP;
+          const plateIndex = plates[blockPlates[id] + Math.floor(choice / L)];
+          const runStart = s0 + (choice % L);
           prefixStack.push(plateIndex);
           backtrack(
             runStart,
@@ -513,7 +602,7 @@ function buildAlgoLib() {
         }
       }
 
-      backtrack(0, activeSets.length - 1, [], 0, 0);
+      backtrack(0, setCount - 1, [], 0, 0);
       return stacks;
     }
 
