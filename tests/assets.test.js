@@ -179,15 +179,16 @@ test('CI tests both desktop platforms, builds once and deploys that artifact', (
   const deploy = workflow.split('\n  deploy:\n')[1];
   assert.ok(deploy);
   assert.doesNotMatch(deploy, /checkout|setup-node|npm run build/);
-  assert.match(deploy, /actions\/deploy-pages@v4/);
+  assert.match(deploy, /actions\/deploy-pages@v\d+/);
 });
 
 test('metadata documents the shipped behavior', () => {
   const packageJson = JSON.parse(read('package.json'));
   const readme = read('README.md');
-  assert.equal(packageJson.version, '1.5.0');
+  assert.equal(packageJson.version, '1.5.1');
   assert.equal(packageJson.scripts['test:browser'], 'npm run build && playwright test');
-  assert.equal(packageJson.devDependencies['@playwright/test'], '1.57.0');
+  // Exact pin, no range: Dependabot may move the number, not the style.
+  assert.match(packageJson.devDependencies['@playwright/test'], /^\d+\.\d+\.\d+$/);
   assert.match(readme, /optional custom-stock panel/);
   assert.match(readme, /Unit tests run on both Ubuntu and Windows/);
   assert.match(readme, /exact `\/plateloader\/` project path/);
@@ -198,7 +199,7 @@ test('metadata documents the shipped behavior', () => {
 
 test('committed text uses LF and all JavaScript parses under Node', () => {
   const textFiles = [
-    '.gitattributes', '.github/workflows/pages.yml', '.gitignore', 'README.md',
+    '.gitattributes', '.github/dependabot.yml', '.github/workflows/pages.yml', '.gitignore', 'README.md',
     'index.html', 'manifest.json', 'package.json', 'plateloader.css',
     'plateloader.js', 'playwright.config.js', 'state.js', 'algo.js',
     'algo-worker.js', 'sw.js', 'scripts/build-site.js', 'tests/browser.spec.js',

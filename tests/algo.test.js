@@ -105,12 +105,12 @@ function orderedStacks(counts, monotonic) {
   return output;
 }
 
-function candidatesForWeight(total, plateMax, monotonic, sided) {
-  const perSide = (total - BAR) / sided;
+function candidatesForWeight(total, plateMax, monotonic, sided, bar = BAR) {
+  const perSide = (total - bar) / sided;
   const targetUnits = Math.round(perSide * 4);
   if (
     !Number.isFinite(total) ||
-    total < BAR ||
+    total < bar ||
     perSide < 0 ||
     Math.abs(targetUnits - perSide * 4) > EPSILON
   ) return [];
@@ -124,7 +124,7 @@ function candidatesForWeight(total, plateMax, monotonic, sided) {
 
 // Invalid entries are annotations rather than bar states. The oracle therefore
 // removes impossible entries and optimises every remaining valid set together.
-function oracleObjective(weights, mode, plateMax, startStack, monotonic, sided) {
+function oracleObjective(weights, mode, plateMax, startStack, monotonic, sided, bar = BAR) {
   const effectiveMax = plateMax.slice();
   let pinned = null;
 
@@ -146,7 +146,7 @@ function oracleObjective(weights, mode, plateMax, startStack, monotonic, sided) 
 
   const userCandidateSets = [];
   for (const weight of weights) {
-    const candidates = candidatesForWeight(weight, effectiveMax, monotonic, sided);
+    const candidates = candidatesForWeight(weight, effectiveMax, monotonic, sided, bar);
     if (candidates.length > 0) userCandidateSets.push(candidates);
   }
 
@@ -202,6 +202,81 @@ function assertPairClose(actual, expected, context) {
     `${context}: secondary ${actual[1]} !== ${expected[1]}`);
 }
 
+// Structural checks that hold for every result independently of the oracle:
+// stacks sum to their targets within the effective caps, a pinned start is
+// returned verbatim, monotonic stacks stay ordered, reported transition and
+// cleanup costs equal a recomputation from the stacks, and only the final
+// valid set carries the cleanup.
+function assertResultInvariants(results, {
+  weights, plateMax, startStack, monotonic, sided, bar = BAR, context,
+}) {
+  const units = PLATES.map((plate) => Math.round(plate.kg * 4));
+  const effectiveMax = plateMax.slice();
+  for (const plateIdx of startStack || []) {
+    effectiveMax[plateIdx] = Math.max(
+      effectiveMax[plateIdx],
+      startStack.filter((other) => other === plateIdx).length,
+    );
+  }
+  const hasStart = algo.hasPinnedStart(weights, startStack, results);
+  assert.equal(results.length, weights.length + (hasStart ? 1 : 0), `${context}: result count`);
+
+  let previous = [];
+  let lastValid = -1;
+  results.forEach((result, index) => {
+    if (!result.valid) {
+      assert.equal(typeof result.reason, 'string', `${context}: row ${index} lacks a reason`);
+      return;
+    }
+    const counts = new Array(PLATES.length).fill(0);
+    for (const plateIdx of result.stack) counts[plateIdx]++;
+    counts.forEach((count, plateIdx) => {
+      assert.ok(count <= effectiveMax[plateIdx], `${context}: cap exceeded at row ${index}`);
+    });
+    if (hasStart && index === 0) {
+      assert.deepEqual(result.stack, startStack, `${context}: pinned stack altered`);
+    } else {
+      const target = weights[index - (hasStart ? 1 : 0)];
+      const sum = result.stack.reduce((total, plateIdx) => total + units[plateIdx], 0);
+      assert.ok(Math.abs((target - bar) * 4 / sided - sum) < EPSILON,
+        `${context}: stack sum mismatch at row ${index}`);
+    }
+    if (monotonic) {
+      for (let position = 1; position < result.stack.length; position++) {
+        assert.ok(result.stack[position] >= result.stack[position - 1],
+          `${context}: non-monotonic stack at row ${index}`);
+      }
+    }
+    const [moves, kg] = transitionPair(lastValid < 0 ? [] : previous, result.stack, 'count', sided);
+    assert.equal(result.bothSidesMoves, moves, `${context}: reported moves differ at row ${index}`);
+    assert.ok(Math.abs(result.bothSidesKg - kg) < EPSILON, `${context}: reported kg differ at row ${index}`);
+    previous = result.stack;
+    lastValid = index;
+  });
+
+  results.forEach((result, index) => {
+    if (index !== lastValid) assert.equal(result.cleanup, undefined, `${context}: cleanup on row ${index}`);
+  });
+  if (lastValid >= 0) {
+    const [moves] = transitionPair(results[lastValid].stack, [], 'count', sided);
+    assert.equal(results[lastValid].cleanup.bothSidesMoves, moves, `${context}: cleanup moves differ`);
+  }
+}
+
+// Number of ordered stacks candidatesForWeight would enumerate, from the
+// combination counts alone, so oversized oracle cases can be skipped cheaply.
+function candidateCount(total, plateMax, monotonic, sided, bar = BAR) {
+  const perSide = (total - bar) / sided;
+  const targetUnits = Math.round(perSide * 4);
+  if (!Number.isFinite(total) || total < bar || Math.abs(targetUnits - perSide * 4) > EPSILON) return 0;
+  const factorial = (n) => (n <= 1 ? 1 : n * factorial(n - 1));
+  return countCombinations(targetUnits, plateMax).reduce((sum, counts) => {
+    if (monotonic) return sum + 1;
+    const length = counts.reduce((a, b) => a + b, 0);
+    return sum + counts.reduce((product, count) => product / factorial(count), factorial(length));
+  }, 0);
+}
+
 function checkAgainstOracle({
   weights,
   stock = 1,
@@ -209,23 +284,26 @@ function checkAgainstOracle({
   startStack = null,
   monotonic = false,
   sided = 2,
+  bar = BAR,
+  modes = ['count', 'kg', 'sqrt'],
 }) {
   const plateMax = stockByPlate ? stockByPlate.slice() : PLATES.map(() => stock);
-  for (const mode of ['count', 'kg', 'sqrt']) {
+  for (const mode of modes) {
+    const context = JSON.stringify({ weights, mode, plateMax, startStack, monotonic, sided, bar });
     const results = algo.optimize(
       weights.slice(),
       mode,
       plateMax.slice(),
       PLATES,
-      BAR,
+      bar,
       startStack && startStack.slice(),
       monotonic,
       sided,
     );
+    assertResultInvariants(results, { weights, plateMax, startStack, monotonic, sided, bar, context });
     const actual = resultObjective(results, mode);
-    const expected = oracleObjective(weights, mode, plateMax, startStack, monotonic, sided);
-    assertPairClose(actual, expected,
-      JSON.stringify({ weights, mode, plateMax, startStack, monotonic, sided }));
+    const expected = oracleObjective(weights, mode, plateMax, startStack, monotonic, sided, bar);
+    assertPairClose(actual, expected, context);
   }
 }
 
@@ -274,6 +352,72 @@ test('deterministic random small-domain cases match the exhaustive oracle', () =
       sided,
     });
   }
+});
+
+// Wider than the small-domain sweep above: up to nine sets, per-plate stock
+// 0..3 (zero stock on a random subset stands in for a shorter denomination
+// list), zero and 15 kg bars, off-lattice and over-stock rows, pinned starts.
+// Cases whose ordered-stack space is too large for the exhaustive oracle
+// still get the structural invariants.
+test('wider deterministic random cases match the oracle and keep result invariants', () => {
+  let seed = 0x9e3779b9;
+  const random = () => {
+    seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+    return seed / 0x100000000;
+  };
+  const pick = (values) => values[Math.floor(random() * values.length)];
+  const units = PLATES.map((plate) => Math.round(plate.kg * 4));
+  let oracleChecked = 0;
+
+  for (let caseIndex = 0; caseIndex < 400; caseIndex++) {
+    const stockByPlate = PLATES.map(() => (random() < 0.3 ? 0 : 1 + Math.floor(random() * 3)));
+    const sided = random() < 0.3 ? 1 : 2;
+    const bar = pick([0, 15, 20]);
+    const monotonic = random() < 0.35;
+    const maxUnits = Math.min(
+      units.reduce((sum, unit, index) => sum + unit * stockByPlate[index], 0),
+      200,
+    );
+    const weights = Array.from({ length: 1 + Math.floor(random() * 9) }, () => (
+      random() < 0.12
+        ? bar + (random() < 0.5 ? 0.3 : 1000)
+        : bar + sided * Math.floor(random() * (maxUnits + 1)) / 4
+    ));
+    let startStack = null;
+    if (random() < 0.4) {
+      startStack = Array.from(
+        { length: 1 + Math.floor(random() * 3) },
+        () => Math.floor(random() * PLATES.length),
+      );
+      if (monotonic) startStack.sort((left, right) => left - right);
+    }
+    const mode = pick(['count', 'kg', 'sqrt']);
+
+    const effectiveMax = stockByPlate.slice();
+    for (const plateIdx of startStack || []) {
+      effectiveMax[plateIdx] = Math.max(
+        effectiveMax[plateIdx],
+        startStack.filter((other) => other === plateIdx).length,
+      );
+    }
+    const affordable = weights.every((weight) =>
+      candidateCount(weight, effectiveMax, monotonic, sided, bar) <= 400);
+
+    if (affordable) {
+      checkAgainstOracle({ weights, stockByPlate, startStack, monotonic, sided, bar, modes: [mode] });
+      oracleChecked++;
+    } else {
+      const context = JSON.stringify({ weights, mode, stockByPlate, startStack, monotonic, sided, bar });
+      const results = algo.optimize(
+        weights.slice(), mode, stockByPlate.slice(), PLATES, bar,
+        startStack && startStack.slice(), monotonic, sided,
+      );
+      assertResultInvariants(results, {
+        weights, plateMax: stockByPlate, startStack, monotonic, sided, bar, context,
+      });
+    }
+  }
+  assert.ok(oracleChecked >= 300, `only ${oracleChecked} of 400 cases were oracle-checked`);
 });
 
 test('invalid entries stay visible but do not force an unload boundary', () => {
