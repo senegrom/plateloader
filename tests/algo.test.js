@@ -247,9 +247,13 @@ function assertResultInvariants(results, {
           `${context}: non-monotonic stack at row ${index}`);
       }
     }
-    const [moves, kg] = transitionPair(lastValid < 0 ? [] : previous, result.stack, 'count', sided);
+    const from = lastValid < 0 ? [] : previous;
+    const [moves, kg] = transitionPair(from, result.stack, 'count', sided);
+    const [sqrtKg] = transitionPair(from, result.stack, 'sqrt', sided);
     assert.equal(result.bothSidesMoves, moves, `${context}: reported moves differ at row ${index}`);
     assert.ok(Math.abs(result.bothSidesKg - kg) < EPSILON, `${context}: reported kg differ at row ${index}`);
+    assert.ok(Math.abs(result.bothSidesSqrtKg - sqrtKg) < EPSILON,
+      `${context}: reported sqrt kg differ at row ${index}`);
     previous = result.stack;
     lastValid = index;
   });
@@ -258,8 +262,12 @@ function assertResultInvariants(results, {
     if (index !== lastValid) assert.equal(result.cleanup, undefined, `${context}: cleanup on row ${index}`);
   });
   if (lastValid >= 0) {
-    const [moves] = transitionPair(results[lastValid].stack, [], 'count', sided);
-    assert.equal(results[lastValid].cleanup.bothSidesMoves, moves, `${context}: cleanup moves differ`);
+    const { stack, cleanup } = results[lastValid];
+    const [moves, kg] = transitionPair(stack, [], 'count', sided);
+    const [sqrtKg] = transitionPair(stack, [], 'sqrt', sided);
+    assert.equal(cleanup.bothSidesMoves, moves, `${context}: cleanup moves differ`);
+    assert.ok(Math.abs(cleanup.bothSidesKg - kg) < EPSILON, `${context}: cleanup kg differ`);
+    assert.ok(Math.abs(cleanup.bothSidesSqrtKg - sqrtKg) < EPSILON, `${context}: cleanup sqrt kg differ`);
   }
 }
 

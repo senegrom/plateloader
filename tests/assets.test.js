@@ -185,7 +185,7 @@ test('CI tests both desktop platforms, builds once and deploys that artifact', (
 test('metadata documents the shipped behavior', () => {
   const packageJson = JSON.parse(read('package.json'));
   const readme = read('README.md');
-  assert.equal(packageJson.version, '1.5.1');
+  assert.equal(packageJson.version, '1.5.2');
   assert.equal(packageJson.scripts['test:browser'], 'npm run build && playwright test');
   // Exact pin, no range: Dependabot may move the number, not the style.
   assert.match(packageJson.devDependencies['@playwright/test'], /^\d+\.\d+\.\d+$/);

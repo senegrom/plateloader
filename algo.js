@@ -379,7 +379,6 @@ function buildAlgoLib() {
       let blockValues = new Int32Array(1024);
       let blockChoices = new Int32Array(1024);
       let blockPlates = new Int32Array(1024);
-      let blockPlateCount = new Int32Array(1024);
       let values = new Float64Array(1 << 12);
       let valuesUsed = 0;
       let choices = new Int32Array(1 << 12);
@@ -456,9 +455,15 @@ function buildAlgoLib() {
         // admitted run start for that column (j + 1 when j is not admitted).
         const pairs = (L * (L + 1)) >> 1;
         const secondaryBase = extensionCount * pairs;
-        scratch = growFloat64(scratch, 2 * secondaryBase);
-        runMinimum = growInt32(runMinimum, extensionCount * L);
-        stops = stops.length >= L ? stops : new Uint8Array(Math.max(L, stops.length * 2));
+        // These three are rewritten in full for every block, so growth
+        // allocates fresh rather than copying contents that are about to die.
+        if (scratch.length < 2 * secondaryBase) {
+          scratch = new Float64Array(Math.max(2 * secondaryBase, scratch.length * 2));
+        }
+        if (runMinimum.length < extensionCount * L) {
+          runMinimum = new Int32Array(Math.max(extensionCount * L, runMinimum.length * 2));
+        }
+        if (stops.length < L) stops = new Uint8Array(Math.max(L, stops.length * 2));
         for (let index = 0; index < extensionCount * L; index++) runMinimum[index] = L;
         for (let e = 0; e < extensionCount; e++) {
           const plateIndex = extensionPlates[e];
@@ -554,14 +559,12 @@ function buildAlgoLib() {
         blockValues = growInt32(blockValues, blockCount);
         blockChoices = growInt32(blockChoices, blockCount);
         blockPlates = growInt32(blockPlates, blockCount);
-        blockPlateCount = growInt32(blockPlateCount, blockCount);
         plates = growInt32(plates, platesUsed + extensionCount);
         blockStart[id] = s0;
         blockLength[id] = L;
         blockValues[id] = valueBase;
         blockChoices[id] = choiceBase;
         blockPlates[id] = platesUsed;
-        blockPlateCount[id] = extensionCount;
         for (let e = 0; e < extensionCount; e++) plates[platesUsed + e] = extensionPlates[e];
         platesUsed += extensionCount;
         return id;
