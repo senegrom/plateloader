@@ -130,16 +130,16 @@ test('invalid remembered targets are ignored and a valid local preference wins o
   await expect(page.locator('#warmupTarget')).toHaveValue('110');
 });
 
-test('no-worker fallback stays responsive, cancels, then accepts another calculation', async ({ page }) => {
+for (const hideScheduler of [false, true]) {
+test(`no-worker fallback stays responsive and cancels (${hideScheduler ? 'without' : 'with'} native scheduler)`, async ({ page }) => {
   const errors = runtimeErrors(page);
-  await page.addInitScript(() => {
+  await page.addInitScript((hideScheduler) => {
     window.Worker = undefined;
-    // Exercise the portable task scheduler even on Chromium.
-    Object.defineProperty(window, 'scheduler', { value: undefined });
+    if (hideScheduler) Object.defineProperty(window, 'scheduler', { value: undefined });
     window.timerGaps = [];
     let last = performance.now();
     setInterval(() => { const now = performance.now(); window.timerGaps.push(now - last); last = now; }, 10);
-  });
+  }, hideScheduler);
   await page.goto(`./#w=${heavy}&s=6`);
   await expect(page.locator('#cancelCompute')).toBeVisible();
   await expect.poll(() => page.evaluate(() => window.timerGaps.length)).toBeGreaterThan(10);
@@ -155,6 +155,8 @@ test('no-worker fallback stays responsive, cancels, then accepts another calcula
   await expect(page.locator('#startWorkout')).toBeEnabled();
   expect(errors).toEqual([]);
 });
+
+}
 
 test('late fallback rejections and results cannot clear or overwrite a newer request', async ({ page }) => {
   const errors = runtimeErrors(page);
