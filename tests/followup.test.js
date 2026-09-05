@@ -150,7 +150,7 @@ test('many deterministic pauses preserve scratch arenas and exact reconstruction
   let ticks = 0, yields = 0;
   const context = vm.createContext({
     performance: { now: () => ++ticks },
-    scheduler: { yield: async () => { yields++; } },
+    setTimeout: (resolve) => { yields++; resolve(); },
   });
   vm.runInContext(fs.readFileSync(path.join(__dirname, '../algo.js'), 'utf8'), context);
   const library = vm.runInContext('buildAlgoLib()', context);
