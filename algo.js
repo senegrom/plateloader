@@ -9,7 +9,23 @@ function buildAlgoLib() {
   const DENSE_MEMBERSHIP_LIMIT = 32_000_000;
   const EPSILON = 1e-9;
 
-  function optimize(weights, mode, plateMax, PLATES, BAR, startStack, monotonic, sided) {
+  function optimize(weights, mode, plateMax, PLATES, BAR, startStack, monotonic, sided, options = {}) {
+    const leaveLoaded = options && options.leaveLoaded === true;
+    // A caller may bound a synchronous fallback. Expiry aborts the entire
+    // calculation: no heuristic or partial solution is ever returned.
+    const clock = () => typeof performance !== 'undefined' ? performance.now() : Date.now();
+    const duration = options && options.timeLimitMs;
+    const deadline = Number.isFinite(duration) ? clock() + Math.max(0, duration) : Infinity;
+    let operations = 0;
+    function checkTime(force = false) {
+      if (deadline === Infinity || (!force && (++operations & 1023) !== 0)) return;
+      if (clock() >= deadline) {
+        const error = new Error('Exact calculation exceeded the synchronous fallback time budget.');
+        error.name = 'TimeoutError';
+        throw error;
+      }
+    }
+    checkTime(true);
     if (!Array.isArray(PLATES) || PLATES.length === 0) {
       throw new TypeError('At least one plate denomination is required');
     }
@@ -216,6 +232,7 @@ function buildAlgoLib() {
       }
 
       function enumerate(index, remaining) {
+        checkTime();
         if (remaining === 0) {
           registerCombination();
           return;
@@ -244,6 +261,7 @@ function buildAlgoLib() {
         // re-enumerated every sub-multiset for every combination, revisiting
         // the same prefix many times when combinations overlapped.
         while (pending.length) {
+          checkTime();
           const key = pending.pop();
           for (let plateIndex = 0; plateIndex < NP; plateIndex++) {
             if (countAt(key, plateIndex) === 0) continue;
@@ -340,7 +358,19 @@ function buildAlgoLib() {
 
     // Optimise all valid entries together, then reinsert invalid rows without
     // forcing an unload/reload boundary.
-    const activeSets = sets.filter((set) => !set.invalid);
+    const physicalSets = sets.filter((set) => !set.invalid);
+    const activeSets = [];
+    const activeMap = [];
+    // Weighted common-prefix distance is a tree metric. A run of identical
+    // feasible targets can therefore use one stack throughout without raising
+    // either objective. Keep pinned starts separate (their feasible set differs).
+    // Invalid annotations do not interrupt a physical run.
+    for (const set of physicalSets) {
+      const previous = activeSets[activeSets.length - 1];
+      if (!previous || previous.pinnedKey !== undefined || set.pinnedKey !== undefined ||
+          previous.targetUnits !== set.targetUnits) activeSets.push(set);
+      activeMap.push(activeSets.length - 1);
+    }
 
     const primaryPlateCost = new Float64Array(NP);
     const secondaryPlateCost = new Float64Array(NP);
@@ -419,6 +449,7 @@ function buildAlgoLib() {
       }
 
       function computeBlock(s0, end, prefixKey, prefixUnits) {
+        checkTime();
         const L = end - s0 + 1;
 
         let largestPlateIndex = -1;
@@ -488,8 +519,13 @@ function buildAlgoLib() {
               const offset = j - r + 1;
               const column = j - s0;
               const index = base + ((column * (column + 1)) >> 1) + (r - s0);
-              scratch[index] = primaryCost + values[childRow + offset];
-              scratch[secondaryBase + index] = secondaryCost + values[childRowSecondary + offset];
+              // Normally a plate run costs one add and one removal (the DP
+              // uses half-costs). A run ending at the final set costs only its
+              // add when leaving the bar loaded. The pinned initial load is a
+              // constant, so this remains exact for non-empty starting stacks.
+              const factor = leaveLoaded && j === setCount - 1 ? 0.5 : 1;
+              scratch[index] = factor * primaryCost + values[childRow + offset];
+              scratch[secondaryBase + index] = factor * secondaryCost + values[childRowSecondary + offset];
             }
           }
         }
@@ -534,6 +570,7 @@ function buildAlgoLib() {
               const base = e * pairs + columnBase;
               const baseSecondary = secondaryBase + base;
               for (let r = j; r >= low; r--) {
+                checkTime();
                 const totalPrimary = values[row + (r - i)] + scratch[base + r];
                 const totalSecondary = values[rowSecondary + (r - i)] + scratch[baseSecondary + r];
                 if (
@@ -652,7 +689,7 @@ function buildAlgoLib() {
         continue;
       }
 
-      const stack = stacks[activeIndex];
+      const stack = stacks[activeMap[activeIndex]].slice();
       const transition = transitionStats(activeIndex === 0 ? [] : previousStack, stack);
       const entry = {
         valid: true,
@@ -665,7 +702,7 @@ function buildAlgoLib() {
         bothSidesSqrtKg: transition.bothSidesSqrtKg,
       };
 
-      if (activeIndex === activeSets.length - 1) {
+      if (!leaveLoaded && activeIndex === physicalSets.length - 1) {
         const cleanup = transitionStats(stack, []);
         entry.cleanup = {
           bothSidesMoves: cleanup.bothSidesMoves,
