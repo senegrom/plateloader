@@ -31,12 +31,13 @@ function buildAlgoLib() {
     const cooperative = { until: 0 };
     const search = optimizeSteps(weights, mode, plateMax, PLATES, BAR, startStack, monotonic, sided,
       options, cooperative);
-    const yieldTask = () => typeof globalThis.scheduler?.yield === 'function'
-      ? globalThis.scheduler.yield()
-      : new Promise((resolve) => setTimeout(resolve, 0));
+    // Native scheduler.yield() gives continuations boosted priority, which can
+    // starve ordinary timers on some engines. A timer task shares their queue
+    // and keeps both the progress/cancel UI and unrelated timers responsive.
+    const yieldTask = () => new Promise((resolve) => setTimeout(resolve, 0));
     try {
       // An actual task boundary, not Promise.resolve(): input, timers and paint
-      // must run even on browsers without scheduler.yield().
+      // must run between batches on every supported browser.
       await yieldTask();
       for (;;) {
         if (options.signal?.aborted) throw abortError();
