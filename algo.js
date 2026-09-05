@@ -9,23 +9,67 @@ function buildAlgoLib() {
   const DENSE_MEMBERSHIP_LIMIT = 32_000_000;
   const EPSILON = 1e-9;
 
+  const clock = () => typeof performance !== 'undefined' ? performance.now() : Date.now();
+  const abortError = () => Object.assign(new Error('Calculation cancelled.'), { name: 'AbortError' });
+
+  // Both entry points drive the same search, in the same candidate order. The
+  // worker/direct API runs to completion; the page can pause and resume it.
   function optimize(weights, mode, plateMax, PLATES, BAR, startStack, monotonic, sided, options = {}) {
+    return optimizeSteps(weights, mode, plateMax, PLATES, BAR, startStack, monotonic, sided, options).next().value;
+  }
+
+  async function optimizeAsync(weights, mode, plateMax, PLATES, BAR, startStack, monotonic, sided, options = {}) {
+    // Capture mutable inputs before the first yield. Editing the next request
+    // must never mutate a paused search (including direct API callers).
+    weights = Array.isArray(weights) ? weights.slice() : weights;
+    plateMax = Array.isArray(plateMax) ? plateMax.slice() : plateMax;
+    PLATES = Array.isArray(PLATES) ? PLATES.map((plate) =>
+      typeof plate === 'number' ? plate : { kg: plate && plate.kg }) : PLATES;
+    startStack = Array.isArray(startStack) ? startStack.slice() : startStack;
+    options = { ...options };
+    const sliceMs = Number.isFinite(options.sliceMs) ? Math.max(1, Math.min(16, options.sliceMs)) : 8;
+    const cooperative = { until: 0 };
+    const search = optimizeSteps(weights, mode, plateMax, PLATES, BAR, startStack, monotonic, sided,
+      options, cooperative);
+    const yieldTask = () => typeof globalThis.scheduler?.yield === 'function'
+      ? globalThis.scheduler.yield()
+      : new Promise((resolve) => setTimeout(resolve, 0));
+    try {
+      // An actual task boundary, not Promise.resolve(): input, timers and paint
+      // must run even on browsers without scheduler.yield().
+      await yieldTask();
+      for (;;) {
+        if (options.signal?.aborted) throw abortError();
+        cooperative.until = clock() + sliceMs;
+        const result = search.next();
+        if (result.done) return result.value;
+        await yieldTask();
+      }
+    } finally {
+      // Release suspended frames and their arenas after cancellation/failure.
+      search.return();
+    }
+  }
+
+  function* optimizeSteps(weights, mode, plateMax, PLATES, BAR, startStack, monotonic, sided, options = {}, cooperative = null) {
     const leaveLoaded = options && options.leaveLoaded === true;
-    // A caller may bound a synchronous fallback. Expiry aborts the entire
-    // calculation: no heuristic or partial solution is ever returned.
-    const clock = () => typeof performance !== 'undefined' ? performance.now() : Date.now();
     const duration = options && options.timeLimitMs;
+    const signal = options && options.signal;
     const deadline = Number.isFinite(duration) ? clock() + Math.max(0, duration) : Infinity;
     let operations = 0;
-    function checkTime(force = false) {
-      if (deadline === Infinity || (!force && (++operations & 1023) !== 0)) return;
-      if (clock() >= deadline) {
-        const error = new Error('Exact calculation exceeded the synchronous fallback time budget.');
+    function checkpoint(force = false) {
+      if (deadline === Infinity && !cooperative && !signal) return false;
+      if (!force && (++operations & 127) !== 0) return false;
+      if (signal?.aborted) throw abortError();
+      const now = clock();
+      if (now >= deadline) {
+        const error = new Error('Exact calculation exceeded its time budget.');
         error.name = 'TimeoutError';
         throw error;
       }
+      return cooperative && now >= cooperative.until;
     }
-    checkTime(true);
+    checkpoint(true);
     if (!Array.isArray(PLATES) || PLATES.length === 0) {
       throw new TypeError('At least one plate denomination is required');
     }
@@ -202,7 +246,7 @@ function buildAlgoLib() {
       Math.floor(key / multipliers[plateIndex]) % (plateMax[plateIndex] + 1);
 
     const feasibilityCache = new Map();
-    function feasibilityFor(targetUnits) {
+    function* feasibilityFor(targetUnits) {
       const cached = feasibilityCache.get(targetUnits);
       if (cached !== undefined) return cached;
 
@@ -231,37 +275,58 @@ function buildAlgoLib() {
         if (prefixKeys.add(key)) pending.push(key);
       }
 
-      function enumerate(index, remaining) {
-        checkTime();
-        if (remaining === 0) {
-          registerCombination();
-          return;
-        }
-        if (
-          index >= NP ||
-          remaining > suffixMaximumUnits[index] ||
-          (suffixDenominationGcd[index] !== 0 &&
-            remaining % suffixDenominationGcd[index] !== 0)
-        ) return;
-
-        const unit = units[index];
-        const maximum = Math.min(plateMax[index], Math.floor(remaining / unit));
-        // The descending loop always ends at zero, which restores the
-        // "counts are zero from here outward" invariant the callers rely on.
-        for (let count = maximum; count >= 0; count--) {
-          counts[index] = count;
-          enumerate(index + 1, remaining - count * unit);
+      function* enumerate() {
+        // An explicit DFS cursor avoids allocating a generator for every
+        // combination branch. Descending counts preserve the original order
+        // and leave all deeper counts at zero when a branch is exhausted.
+        const remainingAt = new Array(NP + 1).fill(0);
+        const nextCount = new Array(NP).fill(-1);
+        remainingAt[0] = targetUnits;
+        let depth = 0;
+        while (depth >= 0) {
+          if (checkpoint()) yield;
+          if (depth < NP && nextCount[depth] === -2) {
+            counts[depth] = 0;
+            depth--;
+            continue;
+          }
+          const remaining = remainingAt[depth];
+          if (remaining === 0) {
+            registerCombination();
+            depth--;
+            continue;
+          }
+          if (depth >= NP || remaining > suffixMaximumUnits[depth] ||
+              (suffixDenominationGcd[depth] !== 0 && remaining % suffixDenominationGcd[depth] !== 0)) {
+            depth--;
+            continue;
+          }
+          if (nextCount[depth] < 0) {
+            nextCount[depth] = Math.min(plateMax[depth], Math.floor(remaining / units[depth]));
+          }
+          const count = nextCount[depth];
+          counts[depth] = count;
+          if (count === 0) {
+            // Zero is the final child. Use -2 to distinguish exhausted frames
+            // from newly entered frames, whose first count is still unknown.
+            nextCount[depth] = -2;
+          } else {
+            nextCount[depth]--;
+          }
+          remainingAt[depth + 1] = remaining - count * units[depth];
+          depth++;
+          if (depth < NP) nextCount[depth] = -1;
         }
       }
 
-      enumerate(0, targetUnits);
+      yield* enumerate();
 
       if (!monotonic) {
         // Compute the downward closure once. The legacy implementation
         // re-enumerated every sub-multiset for every combination, revisiting
         // the same prefix many times when combinations overlapped.
         while (pending.length) {
-          checkTime();
+          if (checkpoint()) yield;
           const key = pending.pop();
           for (let plateIndex = 0; plateIndex < NP; plateIndex++) {
             if (countAt(key, plateIndex) === 0) continue;
@@ -276,7 +341,7 @@ function buildAlgoLib() {
       return feasibility;
     }
 
-    const sets = weights.map((weight, index) => {
+    function* createSet(weight, index) {
       const total = Number(weight);
       const isPinned = Boolean(startStack && index === 0);
 
@@ -332,7 +397,7 @@ function buildAlgoLib() {
         };
       }
 
-      const feasibility = feasibilityFor(targetUnits);
+      const feasibility = yield* feasibilityFor(targetUnits);
       if (!feasibility.hasCombinations) {
         return {
           invalid: true,
@@ -341,7 +406,11 @@ function buildAlgoLib() {
         };
       }
       return { invalid: false, total, targetUnits, feasibility };
-    });
+    }
+    const sets = [];
+    for (let index = 0; index < weights.length; index++) {
+      sets.push(yield* createSet(weights[index], index));
+    }
 
     // Invalid user entries are display annotations, not physical bar states.
     // A pinned starting stack matters only when at least one requested set can
@@ -393,7 +462,7 @@ function buildAlgoLib() {
     // in the original order (stop, then plates ascending, then run start
     // descending, strict improvement only), so results are identical to the
     // per-interval formulation. Block records and values live in flat arenas.
-    function optimizeRun() {
+    function* optimizeRun() {
       const setCount = activeSets.length;
       const memo = new Map();
       const maxTableKey = (stateCount - 1) * setCount + setCount - 1;
@@ -436,20 +505,20 @@ function buildAlgoLib() {
       const rowStart = (L, i) => i * (L + 1) - ((i * (i - 1)) >> 1);
       const blockTotal = (L) => (L * (L + 3)) >> 1;
 
-      function block(start, prefixKey, prefixUnits) {
+      function* block(start, prefixKey, prefixUnits) {
         const cached = memo.get(packTableKey(start, prefixKey));
         if (cached !== undefined) return cached;
         let s0 = start;
         while (s0 > 0 && admits(s0 - 1, prefixKey)) s0--;
         let end = start;
         while (end + 1 < setCount && admits(end + 1, prefixKey)) end++;
-        const id = computeBlock(s0, end, prefixKey, prefixUnits);
+        const id = yield* computeBlock(s0, end, prefixKey, prefixUnits);
         for (let s = s0; s <= end; s++) memo.set(packTableKey(s, prefixKey), id);
         return id;
       }
 
-      function computeBlock(s0, end, prefixKey, prefixUnits) {
-        checkTime();
+      function* computeBlock(s0, end, prefixKey, prefixUnits) {
+        if (checkpoint()) yield;
         const L = end - s0 + 1;
 
         let largestPlateIndex = -1;
@@ -476,7 +545,10 @@ function buildAlgoLib() {
           const key = prefixKey + multipliers[plateIndex];
           const extendedUnits = prefixUnits + units[plateIndex];
           for (let r = s0; r <= end; r++) {
-            if (admits(r, key)) block(r, key, extendedUnits);
+            // Avoid constructing a delegated generator for cached children.
+            if (admits(r, key) && !memo.has(packTableKey(r, key))) {
+              yield* block(r, key, extendedUnits);
+            }
           }
         }
 
@@ -503,6 +575,7 @@ function buildAlgoLib() {
           const secondaryCost = secondaryPlateCost[plateIndex];
           const base = e * pairs;
           for (let r = s0; r <= end; r++) {
+            if (checkpoint()) yield;
             if (!admits(r, key)) continue;
             const child = memo.get(packTableKey(r, key));
             const childStart = blockStart[child];
@@ -545,6 +618,44 @@ function buildAlgoLib() {
         const choiceBase = choicesUsed;
         valuesUsed += 2 * total;
         choicesUsed += total;
+        // Keep the numerical hot loop in a regular function. The generator
+        // pauses only between columns, so candidate evaluation needs neither
+        // generator frames nor asynchronous calls.
+        function solveColumn(i, j, row, rowSecondary, rowChoice) {
+          const m = j - i + 1;
+          let bestPrimary = Infinity;
+          let bestSecondary = Infinity;
+          let bestChoice = -2;
+          if (stops[j] === 1) {
+            bestPrimary = values[row + m - 1];
+            bestSecondary = values[rowSecondary + m - 1];
+            bestChoice = -1;
+          }
+          const columnBase = (j * (j + 1)) >> 1;
+          for (let e = 0; e < extensionCount; e++) {
+            let low = runMinimum[e * L + j];
+            if (low > j) continue;
+            if (low < i) low = i;
+            const base = e * pairs + columnBase;
+            const baseSecondary = secondaryBase + base;
+            for (let r = j; r >= low; r--) {
+              const totalPrimary = values[row + (r - i)] + scratch[base + r];
+              const totalSecondary = values[rowSecondary + (r - i)] + scratch[baseSecondary + r];
+              if (
+                totalPrimary < bestPrimary - EPSILON ||
+                (totalPrimary <= bestPrimary + EPSILON &&
+                  totalSecondary < bestSecondary - EPSILON)
+              ) {
+                bestPrimary = totalPrimary;
+                bestSecondary = totalSecondary;
+                bestChoice = e * L + r;
+              }
+            }
+          }
+          values[row + m] = bestPrimary;
+          values[rowSecondary + m] = bestSecondary;
+          choices[rowChoice + m] = bestChoice;
+        }
         for (let i = 0; i < L; i++) {
           const row = valueBase + rowStart(L, i);
           const rowSecondary = secondaryValueBase + rowStart(L, i);
@@ -553,43 +664,10 @@ function buildAlgoLib() {
           values[rowSecondary] = 0;
           choices[rowChoice] = -2;
           for (let j = i; j < L; j++) {
-            // One deadline check per column keeps the budget granularity
-            // well under a millisecond without a call in the innermost loop,
-            // which cost the normal worker path up to 70% when it ran there.
-            checkTime();
-            const m = j - i + 1;
-            let bestPrimary = Infinity;
-            let bestSecondary = Infinity;
-            let bestChoice = -2;
-            if (stops[j] === 1) {
-              bestPrimary = values[row + m - 1];
-              bestSecondary = values[rowSecondary + m - 1];
-              bestChoice = -1;
-            }
-            const columnBase = (j * (j + 1)) >> 1;
-            for (let e = 0; e < extensionCount; e++) {
-              let low = runMinimum[e * L + j];
-              if (low > j) continue;
-              if (low < i) low = i;
-              const base = e * pairs + columnBase;
-              const baseSecondary = secondaryBase + base;
-              for (let r = j; r >= low; r--) {
-                const totalPrimary = values[row + (r - i)] + scratch[base + r];
-                const totalSecondary = values[rowSecondary + (r - i)] + scratch[baseSecondary + r];
-                if (
-                  totalPrimary < bestPrimary - EPSILON ||
-                  (totalPrimary <= bestPrimary + EPSILON &&
-                    totalSecondary < bestSecondary - EPSILON)
-                ) {
-                  bestPrimary = totalPrimary;
-                  bestSecondary = totalSecondary;
-                  bestChoice = e * L + r;
-                }
-              }
-            }
-            values[row + m] = bestPrimary;
-            values[rowSecondary + m] = bestSecondary;
-            choices[rowChoice + m] = bestChoice;
+            // Pause at a column boundary, never in the candidate hot loop.
+            // Local indices and the scratch arenas survive a yield unchanged.
+            if (checkpoint()) yield;
+            solveColumn(i, j, row, rowSecondary, rowChoice);
           }
         }
 
@@ -610,7 +688,7 @@ function buildAlgoLib() {
         return id;
       }
 
-      block(0, 0, 0);
+      yield* block(0, 0, 0);
       const stacks = new Array(setCount);
 
       function backtrack(start, end, prefixStack, prefixKey, prefixUnits) {
@@ -681,7 +759,7 @@ function buildAlgoLib() {
       };
     }
 
-    const stacks = optimizeRun();
+    const stacks = yield* optimizeRun();
     const output = [];
     let previousStack = [];
     let activeIndex = 0;
@@ -733,7 +811,7 @@ function buildAlgoLib() {
     );
   }
 
-  return { optimize, hasPinnedStart };
+  return { optimize, optimizeAsync, hasPinnedStart };
 }
 
 if (typeof module !== 'undefined' && module.exports) {
