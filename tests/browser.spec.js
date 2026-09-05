@@ -1,6 +1,54 @@
 'use strict';
 
 const { test, expect } = require('@playwright/test');
+const http = require('node:http');
+const fs = require('node:fs/promises');
+const path = require('node:path');
+
+// An isolated origin can be genuinely disconnected without taking down the
+// shared suite server. no-store prevents the ordinary HTTP cache from making
+// the offline test pass without the service worker.
+async function startOfflineOrigin() {
+  const root = path.resolve(__dirname, '../_site');
+  const types = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css',
+    '.json': 'application/json', '.png': 'image/png', '.woff2': 'font/woff2' };
+  const server = http.createServer(async (request, response) => {
+    try {
+      const pathname = decodeURIComponent(new URL(request.url, 'http://localhost').pathname);
+      if (!pathname.startsWith('/plateloader/')) {
+        response.writeHead(404).end();
+        return;
+      }
+      const file = path.resolve(root, pathname.slice('/plateloader/'.length) || 'index.html');
+      if (!file.startsWith(root + path.sep)) {
+        response.writeHead(403).end();
+        return;
+      }
+      const body = await fs.readFile(file);
+      response.writeHead(200, {
+        'Content-Type': types[path.extname(file)] || 'application/octet-stream',
+        'Cache-Control': 'no-store',
+      });
+      response.end(body);
+    } catch (_) {
+      response.writeHead(404).end();
+    }
+  });
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  return {
+    url: `http://127.0.0.1:${server.address().port}/plateloader/`,
+    async close() {
+      if (!server.listening) return;
+      await new Promise((resolve, reject) => {
+        server.close((error) => error ? reject(error) : resolve());
+        server.closeAllConnections();
+      });
+    },
+  };
+}
 
 function collectRuntimeErrors(page) {
   const errors = [];
@@ -169,28 +217,53 @@ test('missing Worker support falls back to the exact sync optimiser', async ({ p
   expect(runtimeErrors).toEqual([]);
 });
 
-test('project-scoped service worker keeps the app usable offline', async ({ page, context }) => {
+test('project-scoped service worker keeps the app usable offline', async ({ page, context, browserName }) => {
   const runtimeErrors = collectRuntimeErrors(page);
-  await page.goto('./');
-  const scope = await page.evaluate(async () => {
-    const registration = await navigator.serviceWorker.ready;
-    if (!navigator.serviceWorker.controller) {
-      await new Promise((resolve) => {
-        navigator.serviceWorker.addEventListener('controllerchange', resolve, { once: true });
-      });
-    }
-    return registration.scope;
-  });
-  expect(scope).toMatch(/\/plateloader\/$/);
+  const origin = await startOfflineOrigin();
   try {
-    await context.setOffline(true);
+    await page.goto(origin.url);
+    const scope = await page.evaluate(async () => {
+      const registration = await navigator.serviceWorker.ready;
+      if (!navigator.serviceWorker.controller) {
+        await new Promise((resolve) => {
+          navigator.serviceWorker.addEventListener('controllerchange', resolve, { once: true });
+        });
+      }
+      const worker = navigator.serviceWorker.controller;
+      if (worker.state !== 'activated') {
+        await new Promise((resolve) => {
+          worker.addEventListener('statechange', function activated() {
+            if (worker.state !== 'activated') return;
+            worker.removeEventListener('statechange', activated);
+            resolve();
+          });
+        });
+      }
+      return registration.scope;
+    });
+    expect(scope).toBe(origin.url);
+    // Establish a controlled document before disconnecting the origin.
+    await page.reload({ waitUntil: 'domcontentloaded' });
+    expect(await page.evaluate(() => navigator.serviceWorker.controller.state)).toBe('activated');
+    const cached = await page.evaluate(async () => {
+      const files = ['index.html', 'plateloader.js', 'plateloader.css', 'state.js', 'algo.js', 'algo-worker.js'];
+      return Promise.all(files.map(async (file) => Boolean(await caches.match(new URL(file, location.href).href))));
+    });
+    expect(cached.every(Boolean)).toBe(true);
+    await origin.close();
+    await expect(fetch(origin.url)).rejects.toThrow();
+    // Emulated offline reload returned an internal error in mobile WebKit.
+    // Use actual origin unavailability rather than skipping its offline test;
+    // Chromium additionally retains the emulated-disconnection coverage.
+    if (browserName === 'chromium') await context.setOffline(true);
     await page.reload({ waitUntil: 'domcontentloaded' });
     await expect(page.locator('h1')).toContainText('Plate Loader');
     await page.locator('#input').fill('60\n80');
     await expect(page.locator('#summaryPanel')).toBeVisible();
     await expect(page.locator('#outputStatus')).toContainText('2 valid sets');
   } finally {
-    await context.setOffline(false);
+    if (browserName === 'chromium') await context.setOffline(false);
+    await origin.close();
   }
   expect(runtimeErrors).toEqual([]);
 });
