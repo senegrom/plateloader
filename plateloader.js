@@ -25,7 +25,7 @@ let algoLibPromise = null;
 // The normal path runs the exact optimiser in a worker, so avoid parsing its
 // implementation on the main thread as well. Load it here only when
 // workers are unavailable or fail.
-function ensureSyncAlgoLib() {
+function ensureFallbackAlgoLib() {
   if (algoLib) return Promise.resolve(algoLib);
   if (algoLibPromise) return algoLibPromise;
 
@@ -67,21 +67,25 @@ function ensureSyncAlgoLib() {
 
 // ---------- Web Worker for off-main-thread optimisation ----------
 // Cancellation is by reqId: stale results are discarded silently.
-// Bounded exact fallback only if workers cannot start. Runtime errors are reported.
+// Resumable exact fallback only if workers cannot start. Runtime errors are reported.
 let algoWorker = null;
 let workerInitTried = false;
 let workerEverSucceeded = false;
 let currentReqId = 0;
 let inflightReqId = null;
 let workerStartedReqId = null;
+let fallbackController = null;
 let indicatorTimer = null;
 let indicatorReqId = null;
 const INDICATOR_DELAY_MS = 150;
-// Only the synchronous fallback (workers unavailable or unable to start) is
-// bounded, and expiry aborts rather than approximates. Ordinary sessions of
-// up to a few dozen sets finish well inside this; a 200 ms budget rejected
-// plain twenty-set inputs.
-const SYNC_FALLBACK_BUDGET_MS = 3000;
+// The fallback shares the exact search but yields between short batches.
+// Its overall budget still aborts rather than returning an approximation.
+const FALLBACK_BUDGET_MS = 3000;
+
+function cancelFallback() {
+  fallbackController?.abort();
+  fallbackController = null;
+}
 
 function clearIndicator(reqId = null) {
   if (indicatorTimer === null || (reqId !== null && reqId !== indicatorReqId)) return;
@@ -138,7 +142,7 @@ function ensureAlgoWorker() {
       // Quiet on first failure (usually a worker-policy restriction); log if
       // it happens after the worker has already completed useful work.
       if (workerEverSucceeded) {
-        console.warn('[plate-loader] worker died, using sync fallback:', {
+        console.warn('[plate-loader] worker failed:', {
           message: event.message || '(empty)',
           filename: event.filename,
           lineno: event.lineno,
@@ -160,7 +164,7 @@ function ensureAlgoWorker() {
     algoWorker = worker;
     return algoWorker;
   } catch (error) {
-    console.warn('[plate-loader] worker init failed, using sync:', error && error.message);
+    console.warn('[plate-loader] worker init failed, using resumable fallback:', error && error.message);
     return null;
   }
 }
@@ -504,6 +508,8 @@ let workoutSetCount = 0;
 let workoutActive = false;
 let workoutPlanSignature = '';
 const WORKOUT_KEY = 'plateLoader.workout.v1';
+const PREFERENCES_KEY = 'plateLoader.preferences.v1';
+let pendingWorkoutRestore = null;
 const undoHistory = [];
 const sided = () => oneSided ? 1 : 2;
 // startStack = ordered array of plate indices (innermost → outermost),
@@ -530,7 +536,6 @@ const DEFAULT_STATE = Object.freeze({
   customStock: null,
   carriedStock: null,
   leaveLoaded: false,
-  warmupTarget: null,
 });
 
 function buildCustomStockInputs() {
@@ -824,13 +829,16 @@ const updateComputeBtn = () => { goBtn.disabled = inputEl.value.trim().length ==
 
 // "Computing…" indicator is shown only if a compute is still in flight after
 // INDICATOR_DELAY_MS — fast computes don't flash. Every call bumps
-// currentReqId so older responses (worker or sync) are silently discarded
+// currentReqId so older responses (worker or fallback) are silently discarded
 // on arrival, even for empty-input or fallback paths.
 let pendingCompute = false;
-function compute(forceSync) {
+function compute(forceFallback) {
   debouncedCompute.cancel();
+  cancelFallback();
+  clearIndicator();
+  if (pendingWorkoutRestore?.signature !== workoutSignature()) pendingWorkoutRestore = null;
   invalidateWorkout();
-  if (!forceSync && inflightReqId !== null) disposeAlgoWorker(true);
+  if (!forceFallback && inflightReqId !== null) disposeAlgoWorker(true);
   // Skip while tab is hidden, but invalidate any in-flight request so its
   // stale result doesn't render after the user types more.
   if (document.visibilityState === 'hidden') {
@@ -862,12 +870,12 @@ function compute(forceSync) {
     if (currentReqId !== reqId) return;
     out.innerHTML = '<div class="panel computing-indicator">Computing…</div>';
     summaryPanel.hidden = true;
-    $('cancelCompute').hidden = inflightReqId !== reqId;
+    $('cancelCompute').hidden = inflightReqId !== reqId && !fallbackController;
     announceStatus('Computing plate sequence.');
   };
 
   const requestedStartStack = startStack ? startStack.slice() : null;
-  const worker = forceSync ? null : ensureAlgoWorker();
+  const worker = forceFallback ? null : ensureAlgoWorker();
   if (worker) {
     inflightReqId = reqId;
     indicatorReqId = reqId;
@@ -887,39 +895,33 @@ function compute(forceSync) {
       });
       return;
     } catch (error) {
-      console.warn('[plate-loader] worker message failed, retrying sync:', error);
+      console.warn('[plate-loader] worker message failed, using resumable fallback:', error);
       disposeAlgoWorker(false);
       compute(true);
       return;
     }
   }
 
-  // Sync fallback: load the optimiser on demand, then yield via rAF so the
-  // indicator paints before optimize() blocks the main thread.
-  requestAnimationFrame(() => {
-    if (currentReqId !== reqId) return;
-    showIndicator();
-    ensureSyncAlgoLib().then((library) => {
-      if (currentReqId !== reqId) return;
-      requestAnimationFrame(() => {
-        if (currentReqId !== reqId) return;
-        try {
-          const results = library.optimize(
-            weights, CURRENT_MODE, effectivePlateMax(), PLATE_KG, BAR,
-            requestedStartStack, monotonic, sided(),
-            { leaveLoaded, timeLimitMs: SYNC_FALLBACK_BUDGET_MS },
-          );
-          renderResults(
-            results,
-            library.hasPinnedStart(weights, requestedStartStack, results),
-          );
-        } catch (error) {
-          if (currentReqId === reqId) renderComputeError(error);
-        }
-      });
-    }).catch((error) => {
-      if (currentReqId === reqId) renderComputeError(error);
-    });
+  const controller = new AbortController();
+  fallbackController = controller;
+  // Capture all settings before loading or yielding. Stale results, errors and
+  // finalizers are request-scoped and cannot overwrite a newer calculation.
+  const args = [weights, CURRENT_MODE, effectivePlateMax(), PLATE_KG, BAR,
+    requestedStartStack, monotonic, sided(),
+    { leaveLoaded, timeLimitMs: FALLBACK_BUDGET_MS, signal: controller.signal }];
+  indicatorReqId = reqId;
+  indicatorTimer = setTimeout(showIndicator, INDICATOR_DELAY_MS);
+  ensureFallbackAlgoLib().then(async (library) => {
+    if (currentReqId !== reqId || controller.signal.aborted) return;
+    const results = await library.optimizeAsync(...args);
+    if (currentReqId !== reqId || controller.signal.aborted) return;
+    clearIndicator(reqId);
+    renderResults(results, library.hasPinnedStart(weights, requestedStartStack, results));
+  }).catch((error) => {
+    if (currentReqId === reqId && error.name !== 'AbortError') renderComputeError(error);
+  }).finally(() => {
+    if (fallbackController === controller) fallbackController = null;
+    clearIndicator(reqId);
   });
 }
 
@@ -985,13 +987,12 @@ const snapshotState = () => ({
   stock:      stockPreset,
   customStock: customStock ? customStock.slice() : null,
   bar:        BAR,
-  startStack: startStack,
+  startStack: startStack ? startStack.slice() : null,
   monotonic:  monotonic,
   oneSided:   oneSided,
   compact:    document.body.classList.contains('compact'),
   leaveLoaded,
   carriedStock: carriedStock ? carriedStock.slice() : null,
-  warmupTarget: lastWarmupTarget,
 });
 
 const saveState = () => {
@@ -999,6 +1000,7 @@ const saveState = () => {
 };
 
 function applyState(state) {
+  pendingWorkoutRestore = null;
   const next = state && typeof state === 'object' ? state : DEFAULT_STATE;
   const input = typeof next.input === 'string' ? next.input : DEFAULT_STATE.input;
   // Preserve crafted state long enough for the input validator to report it;
@@ -1007,7 +1009,6 @@ function applyState(state) {
   carriedStock = stateLib.parseStockVector(next.carriedStock, PLATES.length, START_MAX_PER_TYPE);
   leaveLoaded = next.leaveLoaded === true;
   $('leaveLoadedToggle').checked = leaveLoaded;
-  lastWarmupTarget = Number.isFinite(next.warmupTarget) && next.warmupTarget > 0 ? next.warmupTarget : null;
   setMode(['count', 'kg', 'sqrt'].includes(next.mode) ? next.mode : DEFAULT_MODE);
   setStock(Number.isInteger(next.stock) ? next.stock : DEFAULT_STOCK);
   setCustomStock(next.customStock);
@@ -1018,6 +1019,30 @@ function applyState(state) {
   setMonotonic(next.monotonic === true);
   setCompact(next.compact === true);
   startDetails.open = Boolean(startStack && startStack.length);
+}
+
+function validWarmupPreference(value) {
+  return Number.isFinite(value) && value > 0 && value <= MAX_TOTAL_KG;
+}
+
+function saveWarmupPreference(value) {
+  if (!validWarmupPreference(value)) return;
+  lastWarmupTarget = value;
+  try { localStorage.setItem(PREFERENCES_KEY, JSON.stringify({ warmupTarget: value })); } catch (_) {}
+}
+
+function loadLocalPreferences() {
+  let preferences = null;
+  try { preferences = JSON.parse(localStorage.getItem(PREFERENCES_KEY) || 'null'); } catch (_) {}
+  if (validWarmupPreference(preferences?.warmupTarget)) {
+    lastWarmupTarget = preferences.warmupTarget;
+    return;
+  }
+  // One-way migration from v1.6.0's combined state. Read it even when the URL
+  // determines the plan, and before any persistence can replace that record.
+  let legacy = null;
+  try { legacy = JSON.parse(localStorage.getItem(STATE_KEY) || 'null'); } catch (_) {}
+  if (validWarmupPreference(legacy?.warmupTarget)) saveWarmupPreference(legacy.warmupTarget);
 }
 
 function loadStateFromStorage() {
@@ -1076,6 +1101,8 @@ const schedulePersist = () => {
   debouncedSaveState();
 };
 const scheduleCompute = () => {
+  pendingWorkoutRestore = null;
+  cancelFallback();
   invalidateWorkout();
   ++currentReqId;  // invalidate any result already in flight before the debounce fires
   if (inflightReqId !== null) disposeAlgoWorker(true);
@@ -1112,7 +1139,7 @@ function updateSettingsSummary() {
 }
 
 function rememberReplacement(message) {
-  undoHistory.push({ state: snapshotState(), message });
+  undoHistory.push({ state: snapshotState(), workout: snapshotWorkoutProgress(), message });
   if (undoHistory.length > 10) undoHistory.shift();
   $('undoStatus').textContent = message;
   $('undoBar').hidden = false;
@@ -1121,17 +1148,18 @@ function rememberReplacement(message) {
 function workoutSignature() {
   const state = snapshotState();
   delete state.compact;
-  delete state.warmupTarget;
   return JSON.stringify(state);
 }
 
+function snapshotWorkoutProgress() {
+  if (!workoutSteps.length || workoutPlanSignature !== workoutSignature()) return null;
+  return { signature: workoutPlanSignature, index: workoutIndex, active: workoutActive };
+}
+
 function saveWorkoutProgress() {
-  if (!workoutSteps.length || workoutPlanSignature !== workoutSignature()) return;
-  try {
-    localStorage.setItem(WORKOUT_KEY, JSON.stringify({
-      signature: workoutPlanSignature, index: workoutIndex, active: workoutActive,
-    }));
-  } catch (_) {}
+  const progress = snapshotWorkoutProgress();
+  if (!progress) return;
+  try { localStorage.setItem(WORKOUT_KEY, JSON.stringify(progress)); } catch (_) {}
 }
 
 function showWorkout(on, focus = false) {
@@ -1159,12 +1187,19 @@ function finishWorkoutResults(validSets) {
   workoutSetCount = validSets;
   workoutPlanSignature = workoutSignature();
   workoutIndex = 0;
-  let saved = null;
-  try { saved = JSON.parse(localStorage.getItem(WORKOUT_KEY) || 'null'); } catch (_) {}
+  // Undo owns a separate snapshot; replacement calculations may already have
+  // overwritten the single local-storage progress record. Restore only after
+  // this exact plan has successfully recomputed, never onto a different plan.
+  const restored = pendingWorkoutRestore?.signature === workoutPlanSignature ? pendingWorkoutRestore : null;
+  pendingWorkoutRestore = null;
+  let saved = restored;
+  if (!saved) {
+    try { saved = JSON.parse(localStorage.getItem(WORKOUT_KEY) || 'null'); } catch (_) {}
+  }
   const matches = saved && saved.signature === workoutPlanSignature && Number.isInteger(saved.index) && saved.index >= 0;
   if (matches) workoutIndex = Math.min(saved.index, Math.max(0, workoutSteps.length - 1));
   $('startWorkout').disabled = validSets === 0;
-  showWorkout(matches && saved.active === true);
+  showWorkout(matches && saved.active === true, Boolean(restored));
 }
 
 function renderWorkoutStep() {
@@ -1188,6 +1223,8 @@ function renderWorkoutStep() {
 
 function cancelCalculation() {
   debouncedCompute.cancel();
+  cancelFallback();
+  pendingWorkoutRestore = null;
   ++currentReqId;
   pendingCompute = false;
   disposeAlgoWorker(true);
@@ -1237,6 +1274,7 @@ $('undoAction').addEventListener('click', () => {
   if (!previous) return;
   showWorkout(false);
   applyState(previous.state);
+  pendingWorkoutRestore = previous.workout;
   updateComputeBtn();
   $('undoBar').hidden = undoHistory.length === 0;
   $('undoStatus').textContent = undoHistory.length ? undoHistory[undoHistory.length - 1].message : '';
@@ -1417,7 +1455,7 @@ warmupForm.addEventListener('submit', (e) => {
   }
 
   rememberReplacement('Warmup generated.');
-  lastWarmupTarget = kg;
+  saveWarmupPreference(kg);
   closeWarmupDialog();
   inputEl.value = generated.join('\n');
   updateComputeBtn();
@@ -1530,6 +1568,7 @@ updateStartTotalDisplay();
 
 // A URL hash is a complete, deterministic state. Saved browser state is
 // consulted only when the URL carries no recognised Plate Loader state.
+loadLocalPreferences();
 applyState(DEFAULT_STATE);
 if (!applyHash(location.hash)) loadStateFromStorage();
 updateComputeBtn();
