@@ -2,7 +2,7 @@
 
 // Pure input, URL-state and presentation-math helpers shared by the app and tests.
 function buildStateLib() {
-  const KNOWN_KEYS = new Set(['w', 'm', 's', 'b', 'i', 'o', 'x', 'c', 'p']);
+  const KNOWN_KEYS = new Set(['w', 'm', 's', 'b', 'i', 'o', 'x', 'c', 'p', 'l', 'a']);
   const DECIMAL = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/;
   const hasOwn = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
 
@@ -368,6 +368,8 @@ function buildStateLib() {
     state.monotonic = params.o === '1';
     state.oneSided = params.x === '1';
     state.compact = params.c === '1';
+    if (hasOwn(params, 'l')) state.leaveLoaded = params.l === '1';
+    if (hasOwn(params, 'a')) state.carriedStock = parseStockVector(params.a, options.stockLength, 8);
     if (hasOwn(params, 'p')) {
       state.customStock = parseStockVector(
         params.p, options.stockLength, options.stockMaximum,
@@ -377,7 +379,20 @@ function buildStateLib() {
     return state;
   }
 
+  // Physical instructions: remove from the outside inward, keep the shared
+  // inner prefix, then add from the inside outward. Never sort these arrays.
+  function stackChanges(previous, next) {
+    let shared = 0;
+    while (shared < previous.length && shared < next.length && previous[shared] === next[shared]) shared++;
+    return {
+      remove: previous.slice(shared).reverse(),
+      keep: previous.slice(0, shared),
+      add: next.slice(shared),
+    };
+  }
+
   return {
+    stackChanges,
     clampInteger,
     describeBar,
     generateWarmup,

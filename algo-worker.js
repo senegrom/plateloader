@@ -7,6 +7,7 @@ const algoLib = buildAlgoLib();
 self.onmessage = function (event) {
   try {
     const data = event.data;
+    self.postMessage({ reqId: data.reqId, type: 'started' });
     const results = algoLib.optimize(
       data.weights,
       data.mode,
@@ -16,6 +17,7 @@ self.onmessage = function (event) {
       data.startStack,
       data.monotonic,
       data.sided,
+      { leaveLoaded: data.leaveLoaded === true },
     );
     const hasStart = algoLib.hasPinnedStart(data.weights, data.startStack, results);
     self.postMessage({ reqId: data.reqId, hasStart, results });

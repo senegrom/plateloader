@@ -54,8 +54,8 @@ jobs:
       - name: Install browser test dependency
         run: npm ci --ignore-scripts --no-audit --no-fund
 
-      - name: Install Chromium
-        run: npx playwright install --with-deps chromium
+      - name: Install Chromium and WebKit
+        run: npx playwright install --with-deps chromium webkit
 
       - name: Build and run browser tests
         run: npm run test:browser

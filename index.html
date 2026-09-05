@@ -35,11 +35,20 @@
   </header>
   <noscript><div class="noscript-message">This calculator requires JavaScript — everything runs locally in your browser; nothing is sent to a server.</div></noscript>
 
-  <div class="panel config-panel">
+  <div class="panel config-panel" id="plannerPanel">
     <h2 id="lbl-sets">Sets — total weight in kg</h2>
-    <textarea id="input" rows="5" maxlength="4096" placeholder="60&#10;80&#10;100&#10;120&#10;140" aria-labelledby="lbl-sets" aria-describedby="hint-sets"></textarea>
-    <div class="hint" id="hint-sets">One number per line, comma, semicolon, or space (up to 50 sets). Plates load <span id="loadScopeLabel">symmetrically</span>. Each plate added or removed counts as <code>1 move</code> (a swap = 2 moves).</div>
+    <textarea id="input" rows="4" maxlength="4096" placeholder="60&#10;80&#10;100&#10;120&#10;140" aria-labelledby="lbl-sets" aria-describedby="hint-sets"></textarea>
+    <div class="hint" id="hint-sets">One weight per line, comma, semicolon, or space (up to 50 sets). Plates load <span id="loadScopeLabel">symmetrically</span>.</div>
 
+    <div class="row config-actions">
+      <button type="button" class="btn" id="go">Compute</button>
+      <button type="button" class="btn secondary" id="warmup">Generate warmup</button>
+      <button type="button" class="btn secondary" id="example">Load example</button>
+      <button type="button" class="btn secondary" id="clear">Clear</button>
+    </div>
+    <details class="config-details settings-details" id="settingsDetails">
+      <summary><span class="disclosure-icon" aria-hidden="true"></span><span>Settings</span><span id="settingsSummary" class="hint">20 kg bar · stock 2 per side</span></summary>
+      <div class="settings-body">
     <div class="config-grid">
       <div>
         <h2 id="lbl-bar">Bar weight</h2>
@@ -82,7 +91,7 @@
         </summary>
         <div class="details-body" aria-labelledby="lbl-start" aria-describedby="hint-start">
           <h2 id="lbl-start" class="visually-hidden">Bar starts at</h2>
-          <div class="start-viz" id="startViz" role="img" aria-label="Starting bar configuration"></div>
+          <div class="start-viz" id="startViz" tabindex="0" role="img" aria-label="Starting bar configuration"></div>
           <div class="start-buttons" id="startButtons" role="group" aria-label="Starting plate choices"></div>
           <div class="start-actions">
             <button type="button" class="start-clear-btn start-remove-btn" id="startRemove" disabled>Remove outermost</button>
@@ -103,7 +112,16 @@
     </label>
     <div id="constraintNotice" class="hint constraint-notice" role="status" aria-live="polite" hidden></div>
 
+    <label class="constraint-toggle">
+      <input type="checkbox" id="leaveLoadedToggle" />
+      <span>Leave the final set loaded — do not optimise an unload</span>
+    </label>
+    <div id="carriedStockPanel" class="hint" hidden>
+      <p id="carriedStockNote"></p>
+      <button type="button" class="btn secondary" id="resetCarriedStock">Reset carried inventory</button>
+    </div>
     <h2 id="lbl-mode">Optimisation mode</h2>
+    <p class="hint">Each plate added or removed counts as 1 move (a swap = 2 moves).</p>
     <div class="modes" id="modes" role="radiogroup" aria-labelledby="lbl-mode">
       <button type="button" class="mode-btn active" data-mode="count" role="radio" aria-checked="true" tabindex="0">
         <span class="label">Min plate moves</span>
@@ -119,26 +137,48 @@
       </button>
     </div>
 
-    <div class="row config-actions">
-      <button type="button" class="btn" id="go">Compute</button>
-      <button type="button" class="btn secondary" id="example">Load example</button>
-      <button type="button" class="btn secondary" id="warmup">Generate warmup</button>
-      <button type="button" class="btn secondary" id="compactToggle" aria-pressed="false">Compact view</button>
-      <button type="button" class="btn secondary" id="shareBtn" aria-label="Copy shareable link">Copy link</button>
-      <button type="button" class="btn secondary" id="clear">Clear</button>
-    </div>
-    <div id="shareStatus" class="visually-hidden" role="status" aria-live="polite" aria-atomic="true"></div>
+      </div>
+    </details>
     <div class="hint shortcut-hint">
-      <kbd id="shortcutKbd">Ctrl+Enter</kbd> compute · <kbd id="shortcutFocusKbd">Ctrl+K</kbd> focus input · auto-computes as you type · URL updates for sharing
+      <kbd id="shortcutKbd">Ctrl+Enter</kbd> compute · <kbd id="shortcutFocusKbd">Ctrl+K</kbd> focus input · auto-computes as you type
     </div>
   </div>
 
+  <div class="undo-bar" id="undoBar" hidden>
+    <span id="undoStatus" role="status"></span>
+    <button type="button" class="btn secondary" id="undoAction">Undo</button>
+  </div>
+
+  <section id="workoutPanel" class="panel" aria-labelledby="workoutHeading" hidden>
+    <div class="workout-top">
+      <h2 id="workoutHeading" tabindex="-1">Workout</h2>
+      <button type="button" class="btn secondary" id="editPlan">Plan / all sets</button>
+    </div>
+    <p id="workoutProgress" role="status" aria-live="polite" aria-atomic="true"></p>
+    <div id="workoutCard"></div>
+    <p id="workoutNextPreview" class="hint"></p>
+    <div class="workout-navigation">
+      <button type="button" class="btn secondary" id="workoutPrevious">Previous set</button>
+      <button type="button" class="btn" id="workoutNext">Next set</button>
+    </div>
+    <button type="button" class="btn secondary replan-button" id="replanRemaining">Edit remaining sets from this bar</button>
+    <p class="hint" id="replanHint">This treats the displayed set as complete and its stack as already loaded. Check the actual bar first.</p>
+  </section>
+
   <section id="results" class="results-region" aria-labelledby="resultsHeading" aria-busy="false" tabindex="-1">
     <h2 id="resultsHeading" class="visually-hidden">Results</h2>
+    <div class="row results-toolbar">
+      <button type="button" class="btn" id="startWorkout" disabled>Workout view</button>
+      <button type="button" class="btn secondary" id="compactToggle" aria-pressed="false">Compact view</button>
+      <button type="button" class="btn secondary" id="shareBtn" aria-label="Copy shareable link">Copy link</button>
+      <button type="button" class="btn secondary" id="cancelCompute" hidden>Cancel calculation</button>
+    </div>
+    <div id="shareStatus" class="visually-hidden" role="status" aria-live="polite" aria-atomic="true"></div>
     <section class="panel" id="summaryPanel" aria-labelledby="summaryHeading" hidden>
       <h2 id="summaryHeading">Summary</h2>
       <div class="summary" id="summary"></div>
       <div class="legend" id="legend"></div>
+      <p class="hint" id="endStateNote"></p>
     </section>
 
     <div id="outputStatus" class="visually-hidden" role="status" aria-live="polite" aria-atomic="true"></div>

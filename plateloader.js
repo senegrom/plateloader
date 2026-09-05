@@ -23,7 +23,7 @@ let algoLib = null;
 let algoLibPromise = null;
 
 // The normal path runs the exact optimiser in a worker, so avoid parsing its
-// 600-line implementation on the main thread as well. Load it here only when
+// implementation on the main thread as well. Load it here only when
 // workers are unavailable or fail.
 function ensureSyncAlgoLib() {
   if (algoLib) return Promise.resolve(algoLib);
@@ -67,12 +67,13 @@ function ensureSyncAlgoLib() {
 
 // ---------- Web Worker for off-main-thread optimisation ----------
 // Cancellation is by reqId: stale results are discarded silently.
-// Sync fallback if Worker creation fails or the worker errors.
+// Bounded exact fallback only if workers cannot start. Runtime errors are reported.
 let algoWorker = null;
 let workerInitTried = false;
 let workerEverSucceeded = false;
 let currentReqId = 0;
 let inflightReqId = null;
+let workerStartedReqId = null;
 let indicatorTimer = null;
 let indicatorReqId = null;
 const INDICATOR_DELAY_MS = 150;
@@ -88,12 +89,14 @@ function disposeAlgoWorker(allowRetry) {
   if (algoWorker) {
     algoWorker.onmessage = null;
     algoWorker.onerror = null;
+    algoWorker.onmessageerror = null;
     try { algoWorker.terminate(); } catch (_) {}
   }
   algoWorker = null;
   workerInitTried = !allowRetry;
   clearIndicator();
   inflightReqId = null;
+  workerStartedReqId = null;
 }
 
 function ensureAlgoWorker() {
@@ -104,14 +107,20 @@ function ensureAlgoWorker() {
   try {
     const worker = new Worker('algo-worker.js');
     worker.onmessage = (event) => {
-      const { reqId, results, error, hasStart } = event.data || {};
+      const { reqId, results, error, hasStart, type } = event.data || {};
+      if (reqId !== currentReqId) return;
+      if (type === 'started') {
+        workerStartedReqId = reqId;
+        return;
+      }
       if (inflightReqId === reqId) inflightReqId = null;
       clearIndicator(reqId);
       if (reqId !== currentReqId) return;
       if (error || !Array.isArray(results)) {
-        console.warn('[plate-loader] worker error, retrying sync:', error || 'invalid result');
-        disposeAlgoWorker(false);
-        compute(true);
+        // A computation failure is not a worker-startup failure. Retrying
+        // this workload on the main thread can freeze the whole interface.
+        disposeAlgoWorker(true);
+        renderComputeError(new Error(error || 'Invalid worker result'));
         return;
       }
       workerEverSucceeded = true;
@@ -132,8 +141,17 @@ function ensureAlgoWorker() {
         });
       }
       const hadInflight = inflightReqId !== null;
-      disposeAlgoWorker(false);
-      if (hadInflight) compute(true);
+      const hadStarted = workerStartedReqId === inflightReqId && inflightReqId !== null;
+      disposeAlgoWorker(hadStarted);
+      if (hadInflight) {
+        if (hadStarted) renderComputeError(new Error('The background calculation stopped.'));
+        else compute(true);
+      }
+    };
+    worker.onmessageerror = () => {
+      const hadInflight = inflightReqId !== null;
+      disposeAlgoWorker(true);
+      if (hadInflight) renderComputeError(new Error('Could not read the calculation result.'));
     };
     algoWorker = worker;
     return algoWorker;
@@ -167,6 +185,7 @@ function announceStatus(message) {
 
 function setResultsBusy(busy) {
   resultsEl.setAttribute('aria-busy', busy ? 'true' : 'false');
+  if (!busy) $('cancelCompute').hidden = true;
 }
 
 function renderInputErrors(errors) {
@@ -192,10 +211,12 @@ function renderComputeError(error) {
   setResultsBusy(false);
   clearIndicator();
   inflightReqId = null;
-  const message = 'Could not compute this sequence. Check the settings and try again.';
+  const message = error && error.name === 'TimeoutError'
+    ? 'This calculation needs worker support. The browser fallback stopped without returning an approximate result. Reduce the sequence or use a browser with workers enabled.'
+    : 'Could not compute this sequence. Change the settings or press Compute to retry. A failed background calculation is not repeated on the main thread.';
   $('summaryPanel').hidden = true;
   $('output').innerHTML = `<div class="panel input-error" role="alert">
-    <strong>Computation failed.</strong> ${message}
+    <strong>Computation failed.</strong> ${esc(message)}
   </div>`;
   announceStatus(message);
   console.error('[plate-loader] computation failed:', error);
@@ -245,7 +266,7 @@ function renderBarRow(stack, prevStack = [], options = {}) {
 }
 
 function renderBar(stack, prevStack, options) {
-  return `<div class="bar-wrap">${renderBarRow(stack, prevStack, options)}</div>`;
+  return `<div class="bar-wrap" tabindex="0" aria-label="Bar diagram; scroll horizontally for wide stacks">${renderBarRow(stack, prevStack, options)}</div>`;
 }
 
 function plateChips(stack) {
@@ -260,6 +281,27 @@ function plateChips(stack) {
     }
   }
   return parts.length ? parts.join(' ') : `<span class="chip">${emptyLoadLabel()}</span>`;
+}
+
+// Preserve physical order even when the diagram is hidden in compact view.
+function renderOrderedStack(stack) {
+  const scope = oneSided ? 'Loaded side' : 'Each side';
+  const chips = stack.map((index, position) => `<span class="stack-step">${position ? '<span aria-hidden="true">→</span> ' : ''}<span class="stack-chip">${PLATES[index].label} kg</span></span>`).join('');
+  return `<div class="stack-order"><strong>${scope}, collar outward:</strong><div class="stack-plates">${chips || emptyLoadLabel()}</div></div>`;
+}
+
+function renderChanges(previous, next) {
+  const changes = stateLib.stackChanges(previous, next);
+  const names = (stack) => stack.map((index) => `${PLATES[index].label} kg`).join(' → ');
+  const scope = oneSided ? 'Loaded side' : 'Each side';
+  if (!changes.remove.length && !changes.add.length) {
+    return '<div class="loading-instructions"><p>No plate changes.</p></div>';
+  }
+  const lines = [];
+  if (changes.remove.length) lines.push(`<p><strong>Remove, outside first:</strong> ${names(changes.remove)}</p>`);
+  if (changes.keep.length) lines.push(`<p><strong>Keep the inner plates:</strong> ${names(changes.keep)}</p>`);
+  if (changes.add.length) lines.push(`<p><strong>Add, in this order:</strong> ${names(changes.add)}</p>`);
+  return `<div class="loading-instructions"><span class="instruction-scope">${scope}</span>${lines.join('')}</div>`;
 }
 
 const deltaClass = (n) => n === 0 ? 'zero' : n <= 4 ? 'few' : 'many';
@@ -289,6 +331,7 @@ function renderResults(results, hasStart) {
   const out = $('output');
   const summaryPanel = $('summaryPanel');
   const fragment = document.createDocumentFragment();
+  workoutSteps = [];
 
   let totalMoves = 0, totalKg = 0, totalSqrt = 0, validSets = 0;
   const userSetCount = Math.max(0, results.length - (hasStart ? 1 : 0));
@@ -339,11 +382,16 @@ function renderResults(results, hasStart) {
         <div class="set-changes">${changes}</div>
       </div>
       ${renderBar(r.stack, fromStack, { animateChanges: !isStartingState })}
-      <div class="plate-list">${plateChips(r.stack)}${oneSided || r.stack.length === 0 ? '' : ' <span class="scope-note">· per side</span>'}</div>`;
+      ${renderOrderedStack(r.stack)}
+      ${isStartingState ? '' : renderChanges(fromStack, r.stack)}
+      <div class="plate-list"><span class="scope-note">Plate totals: </span>${plateChips(r.stack)}${oneSided || r.stack.length === 0 ? '' : ' <span class="scope-note">· per side</span>'}</div>`;
     card.setAttribute('aria-label', isStartingState
       ? `Starting load: ${r.total} kg`
       : `Set ${setNum}: ${r.total} kg`);
     fragment.appendChild(card);
+    if (!isStartingState) workoutSteps.push({
+      card, result: r, inputIndex: setNum - 1, ordinal: validSets, cleanup: false,
+    });
     previousStack = r.stack;
     physicalIndex++;
 
@@ -370,11 +418,16 @@ function renderResults(results, hasStart) {
         <div class="set-total">→ ${emptyLoadLabel()}</div>
         <div class="set-changes"><span class="delta ${deltaClass(cleanupData.bothSidesMoves)}">−${stack.length}${oneSided ? '' : '/side'} · ${moveLabel(cleanupData.bothSidesMoves)}</span>${kgDetail}</div>
       </div>
-      ${renderBar([], stack)}`;
+      ${renderBar([], stack)}
+      ${renderChanges(stack, [])}`;
     fragment.appendChild(cleanup);
+    workoutSteps.push({ card: cleanup, cleanup: true });
   }
 
   out.replaceChildren(fragment);
+  $('endStateNote').textContent = leaveLoaded
+    ? 'Finish with the final stack loaded. No final unload is included in the optimisation or totals.'
+    : 'The final unload is included in the optimisation and totals.';
 
   if (validSets > 0) {
     summaryPanel.hidden = false;
@@ -396,6 +449,7 @@ function renderResults(results, hasStart) {
     ? `; ${invalidSets} invalid set${invalidSets === 1 ? '' : 's'}`
     : '';
   setResultsBusy(false);
+  finishWorkoutResults(validSets);
   announceStatus(`Results updated: ${validLabel}${invalidLabel}.`);
 }
 
@@ -437,6 +491,16 @@ const modesEl = $('modes');
 const modeButtons = Array.from(modesEl.querySelectorAll('.mode-btn'));
 let monotonic = false;
 let oneSided  = false;
+let leaveLoaded = false;
+let carriedStock = null;
+let lastWarmupTarget = null;
+let workoutSteps = [];
+let workoutIndex = 0;
+let workoutSetCount = 0;
+let workoutActive = false;
+let workoutPlanSignature = '';
+const WORKOUT_KEY = 'plateLoader.workout.v1';
+const undoHistory = [];
 const sided = () => oneSided ? 1 : 2;
 // startStack = ordered array of plate indices (innermost → outermost),
 // e.g. [1, 4, 1] for "20kg, 5kg, 20kg per side". null = empty bar.
@@ -460,6 +524,9 @@ const DEFAULT_STATE = Object.freeze({
   oneSided: false,
   compact: false,
   customStock: null,
+  carriedStock: null,
+  leaveLoaded: false,
+  warmupTarget: null,
 });
 
 function buildCustomStockInputs() {
@@ -524,7 +591,7 @@ function updateCustomStockCount(index, value) {
 // physically meaningful bar length. The exact optimiser itself has no hidden
 // four-bit count limit.
 const START_MAX_PER_TYPE = 8;
-const START_MAX_TOTAL    = 24;
+const START_MAX_TOTAL    = START_MAX_PER_TYPE * PLATES.length;
 function normaliseStack(arr) {
   if (!Array.isArray(arr) || arr.length === 0 || arr.length > START_MAX_TOTAL) return null;
   const out = [];
@@ -758,6 +825,7 @@ const updateComputeBtn = () => { goBtn.disabled = inputEl.value.trim().length ==
 let pendingCompute = false;
 function compute(forceSync) {
   debouncedCompute.cancel();
+  invalidateWorkout();
   if (!forceSync && inflightReqId !== null) disposeAlgoWorker(true);
   // Skip while tab is hidden, but invalidate any in-flight request so its
   // stale result doesn't render after the user types more.
@@ -790,6 +858,7 @@ function compute(forceSync) {
     if (currentReqId !== reqId) return;
     out.innerHTML = '<div class="panel computing-indicator">Computing…</div>';
     summaryPanel.hidden = true;
+    $('cancelCompute').hidden = inflightReqId !== reqId;
     announceStatus('Computing plate sequence.');
   };
 
@@ -804,12 +873,13 @@ function compute(forceSync) {
         reqId,
         weights,
         mode: CURRENT_MODE,
-        plateMax: plateMax.slice(),
+        plateMax: effectivePlateMax(),
         plateKg: PLATE_KG,
         BAR,
         startStack: requestedStartStack,
         monotonic,
         sided: sided(),
+        leaveLoaded,
       });
       return;
     } catch (error) {
@@ -831,8 +901,9 @@ function compute(forceSync) {
         if (currentReqId !== reqId) return;
         try {
           const results = library.optimize(
-            weights, CURRENT_MODE, plateMax, PLATE_KG, BAR,
+            weights, CURRENT_MODE, effectivePlateMax(), PLATE_KG, BAR,
             requestedStartStack, monotonic, sided(),
+            { leaveLoaded, timeLimitMs: 200 },
           );
           renderResults(
             results,
@@ -853,7 +924,7 @@ function compute(forceSync) {
 const warmupIncrement = () => stateLib.totalIncrement(PLATES, sided(), effectivePlateMax());
 
 function effectivePlateMax() {
-  const maxima = plateMax.slice();
+  const maxima = plateMax.map((count, index) => Math.max(count, carriedStock ? carriedStock[index] : 0));
   if (!startStack) return maxima;
   const startingCounts = new Array(PLATES.length).fill(0);
   for (const plateIndex of startStack) startingCounts[plateIndex]++;
@@ -874,6 +945,7 @@ const warmupMaximum = () => stateLib.maxTotalWeight(
 );
 
 function updateWarmupConstraints() {
+  updateSettingsSummary();
   const note = $('warmupNote');
   const target = $('warmupTarget');
   const button = $('warmup');
@@ -913,6 +985,9 @@ const snapshotState = () => ({
   monotonic:  monotonic,
   oneSided:   oneSided,
   compact:    document.body.classList.contains('compact'),
+  leaveLoaded,
+  carriedStock: carriedStock ? carriedStock.slice() : null,
+  warmupTarget: lastWarmupTarget,
 });
 
 const saveState = () => {
@@ -925,6 +1000,10 @@ function applyState(state) {
   // Preserve crafted state long enough for the input validator to report it;
   // persistence and sharing still cap the stored value.
   inputEl.value = input;
+  carriedStock = stateLib.parseStockVector(next.carriedStock, PLATES.length, START_MAX_PER_TYPE);
+  leaveLoaded = next.leaveLoaded === true;
+  $('leaveLoadedToggle').checked = leaveLoaded;
+  lastWarmupTarget = Number.isFinite(next.warmupTarget) && next.warmupTarget > 0 ? next.warmupTarget : null;
   setMode(['count', 'kg', 'sqrt'].includes(next.mode) ? next.mode : DEFAULT_MODE);
   setStock(Number.isInteger(next.stock) ? next.stock : DEFAULT_STOCK);
   setCustomStock(next.customStock);
@@ -957,6 +1036,8 @@ function serializeHash() {
   if (startStack && startStack.length) parts.push('i=' + startStack.join('.'));
   if (monotonic) parts.push('o=1');
   if (oneSided)  parts.push('x=1');
+  if (leaveLoaded) parts.push('l=1');
+  if (carriedStock) parts.push('a=' + carriedStock.join('.'));
   if (document.body.classList.contains('compact')) parts.push('c=1');
   return parts.length ? '#' + parts.join('&') : '';
 }
@@ -990,6 +1071,7 @@ const schedulePersist = () => {
   debouncedSaveState();
 };
 const scheduleCompute = () => {
+  invalidateWorkout();
   ++currentReqId;  // invalidate any result already in flight before the debounce fires
   if (inflightReqId !== null) disposeAlgoWorker(true);
   else clearIndicator();
@@ -999,6 +1081,7 @@ const scheduleCompute = () => {
 function flushPersistence() {
   debouncedSaveState.cancel();
   persist();
+  saveWorkoutProgress();
 }
 
 window.addEventListener('pagehide', flushPersistence);
@@ -1011,6 +1094,160 @@ document.addEventListener('visibilitychange', () => {
     pendingCompute = false;
     compute();
   }
+});
+
+// ---------- planning / workout workflow ----------
+function updateSettingsSummary() {
+  const scope = oneSided ? 'total' : 'per side';
+  $('settingsSummary').textContent = `${BAR} kg bar · ${customStock ? 'custom stock' : `stock ${stockPreset} ${scope}`}${leaveLoaded ? ' · leave loaded' : ''}`;
+  $('carriedStockPanel').hidden = !carriedStock;
+  $('carriedStockNote').textContent = carriedStock
+    ? `Inventory retained from previous sets (${scope}): ${carriedStock.map((count, index) => `${count} × ${PLATES[index].label} kg`).join(', ')}. These counts remain available until reset.`
+    : '';
+}
+
+function rememberReplacement(message) {
+  undoHistory.push({ state: snapshotState(), message });
+  if (undoHistory.length > 10) undoHistory.shift();
+  $('undoStatus').textContent = message;
+  $('undoBar').hidden = false;
+}
+
+function workoutSignature() {
+  const state = snapshotState();
+  delete state.compact;
+  delete state.warmupTarget;
+  return JSON.stringify(state);
+}
+
+function saveWorkoutProgress() {
+  if (!workoutSteps.length || workoutPlanSignature !== workoutSignature()) return;
+  try {
+    localStorage.setItem(WORKOUT_KEY, JSON.stringify({
+      signature: workoutPlanSignature, index: workoutIndex, active: workoutActive,
+    }));
+  } catch (_) {}
+}
+
+function showWorkout(on, focus = false) {
+  workoutActive = !!on && workoutSteps.length > 0;
+  $('plannerPanel').hidden = workoutActive;
+  resultsEl.hidden = workoutActive;
+  $('workoutPanel').hidden = !workoutActive;
+  if (workoutActive) renderWorkoutStep();
+  saveWorkoutProgress();
+  if (focus) {
+    const target = workoutActive ? $('workoutHeading') : inputEl;
+    target.focus();
+    target.scrollIntoView({ block: 'start' });
+  }
+}
+
+function invalidateWorkout() {
+  workoutSteps = [];
+  workoutPlanSignature = '';
+  $('startWorkout').disabled = true;
+  if (workoutActive) showWorkout(false);
+}
+
+function finishWorkoutResults(validSets) {
+  workoutSetCount = validSets;
+  workoutPlanSignature = workoutSignature();
+  workoutIndex = 0;
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem(WORKOUT_KEY) || 'null'); } catch (_) {}
+  const matches = saved && saved.signature === workoutPlanSignature && Number.isInteger(saved.index) && saved.index >= 0;
+  if (matches) workoutIndex = Math.min(saved.index, Math.max(0, workoutSteps.length - 1));
+  $('startWorkout').disabled = validSets === 0;
+  showWorkout(matches && saved.active === true);
+}
+
+function renderWorkoutStep() {
+  const step = workoutSteps[workoutIndex];
+  if (!step) return;
+  $('workoutProgress').textContent = step.cleanup
+    ? 'Final unload · workout complete'
+    : `Set ${step.ordinal} of ${workoutSetCount} · input row ${step.inputIndex + 1}`;
+  $('workoutCard').replaceChildren(step.card.cloneNode(true));
+  const next = workoutSteps[workoutIndex + 1];
+  $('workoutNextPreview').textContent = next
+    ? (next.cleanup ? 'Next: unload the bar.' : `Next: ${fmtKg(next.result.total)} kg.`)
+    : (leaveLoaded ? 'Final set: leave this stack loaded.' : 'All done.');
+  $('workoutPrevious').disabled = workoutIndex === 0;
+  $('workoutNext').disabled = workoutIndex === workoutSteps.length - 1;
+  $('workoutNext').textContent = next && next.cleanup ? 'Final unload' : 'Next set';
+  const canReplan = !step.cleanup && step.inputIndex < readInput().weights.length - 1;
+  $('replanRemaining').disabled = !canReplan;
+  $('replanHint').hidden = !canReplan;
+}
+
+function cancelCalculation() {
+  debouncedCompute.cancel();
+  ++currentReqId;
+  pendingCompute = false;
+  disposeAlgoWorker(true);
+  invalidateWorkout();
+  setResultsBusy(false);
+  $('summaryPanel').hidden = true;
+  $('output').innerHTML = '<div class="panel">Calculation cancelled. Change the sets or press Compute to try again.</div>';
+  announceStatus('Calculation cancelled.');
+}
+
+$('cancelCompute').addEventListener('click', cancelCalculation);
+$('startWorkout').addEventListener('click', () => showWorkout(true, true));
+$('editPlan').addEventListener('click', () => showWorkout(false, true));
+$('workoutPrevious').addEventListener('click', () => {
+  if (workoutIndex === 0) return;
+  workoutIndex--;
+  renderWorkoutStep();
+  saveWorkoutProgress();
+});
+$('workoutNext').addEventListener('click', () => {
+  if (workoutIndex >= workoutSteps.length - 1) return;
+  workoutIndex++;
+  renderWorkoutStep();
+  saveWorkoutProgress();
+});
+$('replanRemaining').addEventListener('click', () => {
+  const step = workoutSteps[workoutIndex];
+  if (!step || step.cleanup || workoutPlanSignature !== workoutSignature()) return;
+  const remaining = readInput().weights.slice(step.inputIndex + 1);
+  if (!remaining.length) return;
+  const available = effectivePlateMax();
+  rememberReplacement('Remaining sets now start from the displayed, already-loaded bar.');
+  // Keep plates removed in previous sets available, including any starting
+  // inventory above the configured stock. This floor is visible and shareable.
+  carriedStock = available.some((count, index) => count > plateMax[index]) ? available : null;
+  setStartStack(step.result.stack);
+  inputEl.value = remaining.join('\n');
+  showWorkout(false);
+  $('settingsDetails').open = true;
+  startDetails.open = true;
+  updateComputeBtn();
+  persistAndRecompute(true);
+  inputEl.focus();
+});
+$('undoAction').addEventListener('click', () => {
+  const previous = undoHistory.pop();
+  if (!previous) return;
+  showWorkout(false);
+  applyState(previous.state);
+  updateComputeBtn();
+  $('undoBar').hidden = undoHistory.length === 0;
+  $('undoStatus').textContent = undoHistory.length ? undoHistory[undoHistory.length - 1].message : '';
+  persistAndRecompute(true);
+  announceStatus('Previous plan restored.');
+});
+$('leaveLoadedToggle').addEventListener('change', () => {
+  leaveLoaded = $('leaveLoadedToggle').checked;
+  updateSettingsSummary();
+  persistAndRecompute();
+});
+$('resetCarriedStock').addEventListener('click', () => {
+  rememberReplacement('Carried inventory reset.');
+  carriedStock = null;
+  updateWarmupConstraints();
+  persistAndRecompute(true);
 });
 
 // ---------- event wire-up ----------
@@ -1064,6 +1301,7 @@ startButtonsEl.addEventListener('contextmenu', onStartButtonContextMenu);
 startButtonsEl.addEventListener('keydown', onStartButtonKeyDown);
 startRemoveBtn.addEventListener('click', () => removeStartPlate());
 startClearBtn.addEventListener('click', () => {
+  rememberReplacement('Starting stack cleared.');
   setStartStack(null);
   persistAndRecompute();
 });
@@ -1103,11 +1341,14 @@ inputEl.addEventListener('keydown', (e) => {
 
 goBtn.addEventListener('click', () => compute());
 $('example').addEventListener('click', () => {
+  rememberReplacement('Example loaded.');
   inputEl.value = '60\n80\n100\n120\n140';
   updateComputeBtn();
   persistAndRecompute(true);
 });
 $('clear').addEventListener('click', () => {
+  rememberReplacement('Sets and starting stack cleared.');
+  carriedStock = null;
   inputEl.value = '';
   setStartStack(null);  // also clear starting load
   updateComputeBtn();
@@ -1128,11 +1369,14 @@ function closeWarmupDialog() {
 }
 
 warmupBtn.addEventListener('click', () => {
-  if (inputEl.value.trim() && !confirm('Replace current sets with a generated warmup?')) return;
   updateWarmupConstraints();
   const minimum = warmupMinimum();
   const maximum = warmupMaximum();
-  warmupTarget.value = fmtKg(Math.min(maximum, Math.max(minimum, 140)));
+  const entered = readInput().weights;
+  const preferred = entered.length ? entered[entered.length - 1] : (lastWarmupTarget || 140);
+  const ceiling = Math.min(maximum, Math.max(minimum, preferred));
+  const loadable = stateLib.maxTotalWeight(PLATES, effectivePlateMax(), BAR, sided(), ceiling);
+  warmupTarget.value = fmtKg(Math.max(minimum, loadable));
   if (typeof warmupDialog.showModal === 'function') warmupDialog.showModal();
   else warmupDialog.setAttribute('open', '');
   requestAnimationFrame(() => { warmupTarget.focus(); warmupTarget.select(); });
@@ -1167,6 +1411,8 @@ warmupForm.addEventListener('submit', (e) => {
     return;
   }
 
+  rememberReplacement('Warmup generated.');
+  lastWarmupTarget = kg;
   closeWarmupDialog();
   inputEl.value = generated.join('\n');
   updateComputeBtn();
@@ -1251,6 +1497,7 @@ shareBtn.addEventListener('click', async () => {
 
 skipLink.addEventListener('click', (event) => {
   event.preventDefault();
+  showWorkout(false);
   try { resultsEl.focus({ preventScroll: true }); } catch (_) { resultsEl.focus(); }
   resultsEl.scrollIntoView({ block: 'start' });
 });
@@ -1265,6 +1512,7 @@ document.addEventListener('keydown', (e) => {
   if (e.key !== 'k' || (!e.ctrlKey && !e.metaKey) || e.shiftKey || e.altKey) return;
   if (warmupDialog.open || warmupDialog.hasAttribute('open')) return;
   e.preventDefault();
+  showWorkout(false);
   inputEl.focus();
   inputEl.select();
 });
@@ -1280,7 +1528,7 @@ updateStartTotalDisplay();
 applyState(DEFAULT_STATE);
 if (!applyHash(location.hash)) loadStateFromStorage();
 updateComputeBtn();
-if (inputEl.value.trim()) compute();
+compute();
 
 window.addEventListener('hashchange', () => {
   if (!applyHash(location.hash)) {
