@@ -553,6 +553,10 @@ function buildAlgoLib() {
           values[rowSecondary] = 0;
           choices[rowChoice] = -2;
           for (let j = i; j < L; j++) {
+            // One deadline check per column keeps the budget granularity
+            // well under a millisecond without a call in the innermost loop,
+            // which cost the normal worker path up to 70% when it ran there.
+            checkTime();
             const m = j - i + 1;
             let bestPrimary = Infinity;
             let bestSecondary = Infinity;
@@ -570,7 +574,6 @@ function buildAlgoLib() {
               const base = e * pairs + columnBase;
               const baseSecondary = secondaryBase + base;
               for (let r = j; r >= low; r--) {
-                checkTime();
                 const totalPrimary = values[row + (r - i)] + scratch[base + r];
                 const totalSecondary = values[rowSecondary + (r - i)] + scratch[baseSecondary + r];
                 if (

@@ -77,6 +77,11 @@ let workerStartedReqId = null;
 let indicatorTimer = null;
 let indicatorReqId = null;
 const INDICATOR_DELAY_MS = 150;
+// Only the synchronous fallback (workers unavailable or unable to start) is
+// bounded, and expiry aborts rather than approximates. Ordinary sessions of
+// up to a few dozen sets finish well inside this; a 200 ms budget rejected
+// plain twenty-set inputs.
+const SYNC_FALLBACK_BUDGET_MS = 3000;
 
 function clearIndicator(reqId = null) {
   if (indicatorTimer === null || (reqId !== null && reqId !== indicatorReqId)) return;
@@ -115,7 +120,6 @@ function ensureAlgoWorker() {
       }
       if (inflightReqId === reqId) inflightReqId = null;
       clearIndicator(reqId);
-      if (reqId !== currentReqId) return;
       if (error || !Array.isArray(results)) {
         // A computation failure is not a worker-startup failure. Retrying
         // this workload on the main thread can freeze the whole interface.
@@ -266,7 +270,7 @@ function renderBarRow(stack, prevStack = [], options = {}) {
 }
 
 function renderBar(stack, prevStack, options) {
-  return `<div class="bar-wrap" tabindex="0" aria-label="Bar diagram; scroll horizontally for wide stacks">${renderBarRow(stack, prevStack, options)}</div>`;
+  return `<div class="bar-wrap" role="group" tabindex="0" aria-label="Bar diagram; scroll horizontally for wide stacks">${renderBarRow(stack, prevStack, options)}</div>`;
 }
 
 function plateChips(stack) {
@@ -903,7 +907,7 @@ function compute(forceSync) {
           const results = library.optimize(
             weights, CURRENT_MODE, effectivePlateMax(), PLATE_KG, BAR,
             requestedStartStack, monotonic, sided(),
-            { leaveLoaded, timeLimitMs: 200 },
+            { leaveLoaded, timeLimitMs: SYNC_FALLBACK_BUDGET_MS },
           );
           renderResults(
             results,
@@ -1048,6 +1052,7 @@ function applyHash(hash = location.hash) {
   const state = stateLib.stateFromHash(hash, DEFAULT_STATE, {
     stockLength: PLATES.length,
     stockMaximum: STOCK_MAX,
+    carriedMaximum: START_MAX_PER_TYPE,
   });
   if (!state) return false;
   applyState(state);

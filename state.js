@@ -369,7 +369,12 @@ function buildStateLib() {
     state.oneSided = params.x === '1';
     state.compact = params.c === '1';
     if (hasOwn(params, 'l')) state.leaveLoaded = params.l === '1';
-    if (hasOwn(params, 'a')) state.carriedStock = parseStockVector(params.a, options.stockLength, 8);
+    if (hasOwn(params, 'a')) {
+      // Carried inventory is bounded by the app's starting-stack limit, which
+      // the caller passes; the fallback matches the current UI bound.
+      const carriedMaximum = Number.isInteger(options.carriedMaximum) ? options.carriedMaximum : 8;
+      state.carriedStock = parseStockVector(params.a, options.stockLength, carriedMaximum);
+    }
     if (hasOwn(params, 'p')) {
       state.customStock = parseStockVector(
         params.p, options.stockLength, options.stockMaximum,
