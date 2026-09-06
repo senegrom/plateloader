@@ -716,13 +716,15 @@ dialog.warmup input[type=number]:focus { border-color: var(--accent); }
   }
 }
 
-/* Ordered stacks and physical changes are essential in every view. */
-.stack-order { margin: 10px 0 0; font-size: 13px; line-height: 1.8; }
+/* Ordered text is only needed when compact view hides the bar diagram. */
+.stack-order { display: none; margin: 10px 0 0; font-size: 13px; line-height: 1.8; }
 .stack-order strong { display: block; font-weight: 600; }
 .stack-plates { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px; }
 .stack-step { display: inline-flex; gap: 4px; align-items: baseline; white-space: nowrap; }
 .stack-chip { border: 1px solid var(--line); border-radius: 5px; padding: 1px 7px; font-family: 'JetBrains Mono', monospace; }
-body.compact .stack-order { grid-column: 1 / -1; }
+@media screen {
+  body.compact #output .stack-order { display: block; grid-column: 1 / -1; }
+}
 body.compact .plate-list { grid-column: 1 / -1; }
 .start-btn, .start-clear-btn, .config-details summary, .constraint-toggle, .custom-stock-item input { min-height: 44px; }
 .start-clear-btn { padding: 8px 12px; font-size: 13px; }
