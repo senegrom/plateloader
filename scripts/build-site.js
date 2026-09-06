@@ -31,6 +31,7 @@ const textAssets = [
   'manifest.json',
 ];
 const assetDirectories = ['fonts', 'icons'];
+const fallbackGenerator = 'scripts/generate-fallback.js';
 
 function assertRegularFile(file) {
   const source = path.join(root, file);
@@ -82,6 +83,7 @@ function buildId() {
   const hash = crypto.createHash('sha256');
   const files = [
     ...textAssets,
+    fallbackGenerator,
     ...assetDirectories.flatMap((directory) => listFiles(directory)),
   ].sort((left, right) => left < right ? -1 : left > right ? 1 : 0);
 
@@ -195,6 +197,7 @@ function writeSite() {
     assertOutputDirectory();
 
     for (const file of textAssets) assertRegularFile(file);
+    assertRegularFile(fallbackGenerator);
     for (const directory of assetDirectories) assertDirectory(directory);
     fs.mkdirSync(temporaryOutput);
     const id = buildId();
@@ -216,6 +219,12 @@ function writeSite() {
       for (const directory of assetDirectories) {
         fs.cpSync(path.join(root, directory), path.join(temporaryOutput, directory), { recursive: true });
       }
+      // The plain engine remains source-faithful. Only the separate fallback
+      // build target is cooperative, so workers incur no generator overhead.
+      const { generateFallback } = require('./generate-fallback.js');
+      fs.mkdirSync(path.join(temporaryOutput, 'runtime'));
+      fs.writeFileSync(path.join(temporaryOutput, 'runtime/algo-fallback.js'),
+        generateFallback(fs.readFileSync(path.join(root, 'algo.js'), 'utf8')));
 
       let backedUp = false;
       if (fs.existsSync(output)) {

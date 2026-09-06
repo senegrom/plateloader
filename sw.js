@@ -18,6 +18,7 @@ const APP_SHELL = [
   'plateloader.js',
   'state.js',
   'algo.js',
+  'runtime/algo-fallback.js',
   'algo-worker.js',
   'manifest.json',
   'fonts/Inter-400.woff2',
