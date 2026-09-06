@@ -4,7 +4,7 @@ Plate Loader finds an exact, globally optimal sequence of plate stacks for a lis
 
 ## Loading and workout views
 
-Every valid set shows the physical plate order **from the collar outward**; the diagram marks carried plates and newly added ones. Compact view hides the diagram, not the ordered stack or any required plates. Denomination totals are a secondary inventory summary, not a suggested loading order.
+Every valid set shows the physical plate order **from the collar outward**; the diagram marks carried plates and newly added ones. Compact view replaces the diagram and the denomination totals with the ordered stack, so every required plate stays listed. Denomination totals are a secondary inventory summary, not a suggested loading order.
 
 Settings are collapsed to keep the mobile planner short. Workout view shows the current set, previous/next controls and the next weight. Progress is stored locally and restored only when the plan still matches. The full sequence remains available through **Plan / all sets**.
 

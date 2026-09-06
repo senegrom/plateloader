@@ -441,7 +441,7 @@ textarea[aria-invalid="true"] { border-color: var(--bad); }
 .delta.few  { color: var(--warn); border-color: rgba(243,192,74,0.3); }
 .delta.many { color: var(--bad); border-color: rgba(255,82,82,0.3); }
 .kg-detail { opacity: 0.7; }
-.scope-note { opacity: 0.6; }
+.scope-note { opacity: 0.6; white-space: nowrap; }
 .empty-state { text-align: center; color: var(--ink-dim); }
 
 .bar-wrap {
@@ -550,7 +550,6 @@ textarea[aria-invalid="true"] { border-color: var(--bad); }
   color: var(--bad); font-family: 'JetBrains Mono', monospace; font-size: 13px;
   text-align: center; padding: 8px;
 }
-.invalid-msg .skip-note { display: block; margin-top: 5px; color: var(--ink-dim); }
 
 .legend {
   display: flex; flex-wrap: wrap; gap: 6px 10px;
@@ -723,9 +722,11 @@ dialog.warmup input[type=number]:focus { border-color: var(--accent); }
 .stack-step { display: inline-flex; gap: 4px; align-items: baseline; white-space: nowrap; }
 .stack-chip { border: 1px solid var(--line); border-radius: 5px; padding: 1px 7px; font-family: 'JetBrains Mono', monospace; }
 @media screen {
+  /* Compact view: the ordered stack lists every plate, so the totals line
+     would repeat it. Print keeps the totals as the text alternative. */
   body.compact #output .stack-order { display: block; grid-column: 1 / -1; }
+  body.compact #output .plate-list { display: none; }
 }
-body.compact .plate-list { grid-column: 1 / -1; }
 .start-btn, .start-clear-btn, .config-details summary, .constraint-toggle, .custom-stock-item input { min-height: 44px; }
 .start-clear-btn { padding: 8px 12px; font-size: 13px; }
 .settings-details { margin-top: 16px; }
@@ -741,7 +742,6 @@ body.compact .plate-list { grid-column: 1 / -1; }
 #workoutProgress { font-family: 'JetBrains Mono', monospace; }
 #workoutCard .set-total { font-size: clamp(36px, 9vw, 60px); }
 #workoutCard .set-num { display: none; }
-#workoutCard .stack-order { font-size: 16px; }
 #workoutCard .set { display: block; padding: 16px 0; border: 0; background: none; box-shadow: none; }
 #workoutCard .set-head { display: flex; flex-wrap: wrap; gap: 12px; justify-content: space-between; }
 #workoutCard .bar-wrap { display: flex; }

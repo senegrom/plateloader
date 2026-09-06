@@ -197,6 +197,7 @@ function setResultsBusy(busy) {
 
 function renderInputErrors(errors) {
   setResultsBusy(false);
+  $('resultsToolbar').hidden = true;
   const visible = errors.slice(0, 5);
   const remaining = errors.length - visible.length;
   inputEl.setAttribute('aria-invalid', 'true');
@@ -216,6 +217,7 @@ function clearInputErrorState() {
 
 function renderComputeError(error) {
   setResultsBusy(false);
+  $('resultsToolbar').hidden = true;
   clearIndicator();
   inflightReqId = null;
   const message = error && error.name === 'TimeoutError'
@@ -345,7 +347,7 @@ function renderResults(results, hasStart) {
           <div class="set-total">${r.total}<span class="unit">kg</span></div>
           <div class="set-changes"><span class="delta many">invalid</span></div>
         </div>
-        <div class="invalid-msg">${esc(r.reason)}<span class="skip-note">Skipped; this entry does not change the bar, so valid sets remain optimised together.</span></div>`;
+        <div class="invalid-msg">${esc(r.reason)}</div>`;
       card.setAttribute('aria-label', `Set ${setNum}: ${r.total} kg, invalid`);
       fragment.appendChild(card);
       continue;
@@ -416,9 +418,12 @@ function renderResults(results, hasStart) {
   }
 
   out.replaceChildren(fragment);
+  $('resultsToolbar').hidden = false;
+  // The unload card already shows the default ending; only the exception
+  // needs a sentence.
   $('endStateNote').textContent = leaveLoaded
-    ? 'Finish with the final stack loaded. No final unload is included in the optimisation or totals.'
-    : 'The final unload is included in the optimisation and totals.';
+    ? 'The final stack stays loaded; no unload is optimised or counted.'
+    : '';
 
   if (validSets > 0) {
     summaryPanel.hidden = false;
@@ -842,6 +847,7 @@ function compute(forceFallback) {
   clearInputErrorState();
   if (weights.length === 0) {
     setResultsBusy(false);
+    $('resultsToolbar').hidden = true;
     out.innerHTML = '<div class="panel empty-state">Enter some weights above.</div>';
     summaryPanel.hidden = true;
     announceStatus('No sets entered.');
@@ -849,6 +855,7 @@ function compute(forceFallback) {
   }
 
   setResultsBusy(true);
+  $('resultsToolbar').hidden = false;
   const showIndicator = () => {
     if (currentReqId !== reqId) return;
     out.innerHTML = '<div class="panel computing-indicator">Computing…</div>';
@@ -1188,9 +1195,11 @@ function finishWorkoutResults(validSets) {
 function renderWorkoutStep() {
   const step = workoutSteps[workoutIndex];
   if (!step) return;
+  // The input row only carries information when invalid rows shift the numbering.
+  const row = step.inputIndex + 1 === step.ordinal ? '' : ` · row ${step.inputIndex + 1}`;
   $('workoutProgress').textContent = step.cleanup
     ? 'Final unload · workout complete'
-    : `Set ${step.ordinal} of ${workoutSetCount} · input row ${step.inputIndex + 1}`;
+    : `Set ${step.ordinal} of ${workoutSetCount}${row}`;
   $('workoutCard').replaceChildren(step.card.cloneNode(true));
   const next = workoutSteps[workoutIndex + 1];
   $('workoutNextPreview').textContent = next
@@ -1201,7 +1210,6 @@ function renderWorkoutStep() {
   $('workoutNext').textContent = next && next.cleanup ? 'Final unload' : 'Next set';
   const canReplan = !step.cleanup && step.inputIndex < readInput().weights.length - 1;
   $('replanRemaining').disabled = !canReplan;
-  $('replanHint').hidden = !canReplan;
 }
 
 function cancelCalculation() {
@@ -1213,6 +1221,7 @@ function cancelCalculation() {
   disposeAlgoWorker(true);
   invalidateWorkout();
   setResultsBusy(false);
+  $('resultsToolbar').hidden = true;
   $('summaryPanel').hidden = true;
   $('output').innerHTML = '<div class="panel">Calculation cancelled. Change the sets or press Compute to try again.</div>';
   announceStatus('Calculation cancelled.');

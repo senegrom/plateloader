@@ -37,7 +37,7 @@
 
   <div class="panel config-panel" id="plannerPanel">
     <h2 id="lbl-sets">Sets — total weight in kg</h2>
-    <textarea id="input" rows="4" maxlength="4096" placeholder="60&#10;80&#10;100&#10;120&#10;140" aria-labelledby="lbl-sets" aria-describedby="hint-sets"></textarea>
+    <textarea id="input" rows="5" maxlength="4096" placeholder="60&#10;80&#10;100&#10;120&#10;140" aria-labelledby="lbl-sets" aria-describedby="hint-sets"></textarea>
     <div class="hint" id="hint-sets">One weight per line, comma, semicolon, or space (up to 50 sets). Plates load <span id="loadScopeLabel">symmetrically</span>.</div>
 
     <div class="row config-actions">
@@ -161,13 +161,12 @@
       <button type="button" class="btn secondary" id="workoutPrevious">Previous set</button>
       <button type="button" class="btn" id="workoutNext">Next set</button>
     </div>
-    <button type="button" class="btn secondary replan-button" id="replanRemaining">Edit remaining sets from this bar</button>
-    <p class="hint" id="replanHint">This treats the displayed set as complete and its stack as already loaded. Check the actual bar first.</p>
+    <button type="button" class="btn secondary replan-button" id="replanRemaining" title="Treats this set as done and its stack as already on the bar">Edit remaining sets from this bar</button>
   </section>
 
   <section id="results" class="results-region" aria-labelledby="resultsHeading" aria-busy="false" tabindex="-1">
     <h2 id="resultsHeading" class="visually-hidden">Results</h2>
-    <div class="row results-toolbar">
+    <div class="row results-toolbar" id="resultsToolbar" hidden>
       <button type="button" class="btn" id="startWorkout" disabled>Workout view</button>
       <button type="button" class="btn secondary" id="compactToggle" aria-pressed="false">Compact view</button>
       <button type="button" class="btn secondary" id="shareBtn" aria-label="Copy shareable link">Copy link</button>
