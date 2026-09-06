@@ -1,9 +1,7 @@
 'use strict';
 
 const { test, expect } = require('@playwright/test');
-const http = require('node:http');
-const fs = require('node:fs/promises');
-const path = require('node:path');
+const { startOfflineOrigin } = require('./offline-origin.js');
 const heavy = Array.from({ length: 50 }, (_, i) => i % 2 ? 310 : 320).join('\n');
 
 test('enabled primary actions have normal-text contrast and the worker does not execute the fallback', async ({ page }) => {
@@ -97,29 +95,10 @@ test('late fallback results and finalizers cannot replace a newer request', asyn
 });
 
 test('the generated fallback is cached and works after the origin is shut down', async ({ page }) => {
-  const root = path.resolve(__dirname, '../_site');
-  const types = { '.js': 'text/javascript', '.html': 'text/html', '.css': 'text/css', '.json': 'application/json',
-    '.woff2': 'font/woff2', '.png': 'image/png' };
-  const server = http.createServer(async (request, response) => {
-    try {
-      const pathname = new URL(request.url, 'http://localhost').pathname;
-      if (!pathname.startsWith('/plateloader/')) { response.writeHead(404).end(); return; }
-      const file = path.resolve(root, pathname.slice('/plateloader/'.length) || 'index.html');
-      if (!file.startsWith(root + path.sep)) { response.writeHead(403).end(); return; }
-      const body = await fs.readFile(file);
-      response.writeHead(200, { 'Content-Type': types[path.extname(file)] || 'application/octet-stream', 'Cache-Control': 'no-store' });
-      response.end(body);
-    } catch (_) { response.writeHead(404).end(); }
-  });
-  await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
-  const url = `http://127.0.0.1:${server.address().port}/plateloader/`;
-  const close = async () => {
-    if (!server.listening) return;
-    await new Promise((resolve, reject) => { server.close((e) => e ? reject(e) : resolve()); server.closeAllConnections(); });
-  };
+  const origin = await startOfflineOrigin();
   try {
     await page.addInitScript(() => { Object.defineProperty(window, 'Worker', { value: undefined }); });
-    await page.goto(url);
+    await page.goto(origin.url);
     await page.evaluate(async () => {
       await navigator.serviceWorker.ready;
       if (!navigator.serviceWorker.controller) await new Promise((resolve) =>
@@ -127,11 +106,11 @@ test('the generated fallback is cached and works after the origin is shut down',
     });
     await page.reload();
     expect(await page.evaluate(async () => Boolean(await caches.match(new URL('runtime/algo-fallback.js', location.href).href)))).toBe(true);
-    await close();
-    await expect(fetch(url)).rejects.toThrow();
+    await origin.close();
+    await expect(fetch(origin.url)).rejects.toThrow();
     await page.reload({ waitUntil: 'domcontentloaded' });
     await page.locator('#input').fill('60\n80');
     await expect(page.locator('#outputStatus')).toContainText('2 valid sets');
     expect(await page.evaluate(() => typeof buildFallbackAlgoLib)).toBe('function');
-  } finally { await close(); }
+  } finally { await origin.close(); }
 });

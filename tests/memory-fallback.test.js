@@ -11,7 +11,7 @@ const { generateFallback } = require('../scripts/generate-fallback.js');
 const root = path.resolve(__dirname, '..');
 const source = fs.readFileSync(path.join(root, 'algo.js'), 'utf8');
 const generated = generateFallback(source);
-const plain = buildAlgoLib();
+const engine = buildAlgoLib();
 const kg = [25, 20, 15, 10, 5, 2.5, 1.25];
 function loadFallback(performance = globalThis.performance) {
   const module = { exports: {} };
@@ -79,7 +79,7 @@ function objective(results, mode) {
   return value;
 }
 
-test('compact tables and generated fallback match the plain engine and independent oracle', async () => {
+test('the engine matches an independent oracle and the generated fallback matches the engine', async () => {
   let seed = 7749;
   const random = (n) => { seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; return seed % n; };
   for (let sample = 0; sample < 64; sample++) {
@@ -92,14 +92,12 @@ test('compact tables and generated fallback match the plain engine and independe
       const weights = [a, b, a, b, 21, a, a, bar + sided * 2.5 * random(5)];
       for (const mode of ['count', 'kg', 'sqrt']) for (const leaveLoaded of [false, true]) {
         const args = [weights, mode, stock, kg, bar, start, monotonic, sided];
-        const expected = plain.optimize(...args, { leaveLoaded, compactTables: false });
-        const compact = plain.optimize(...args, { leaveLoaded, compactTables: true });
-        assert.deepEqual(compact, expected, JSON.stringify({ args, leaveLoaded }));
-        const actual = objective(compact, mode);
+        const expected = engine.optimize(...args, { leaveLoaded });
+        const actual = objective(expected, mode);
         const independent = oracle(weights, mode, stock, bar, start, monotonic, sided, leaveLoaded);
-        assert.ok(actual.every((v, i) => Math.abs(v - independent[i]) < 1e-8));
-        // Exercise both generated storage paths, not just the compact solver.
-        const asyncResult = await fallback.optimizeAsync(...args, { leaveLoaded, compactTables: sample % 2 === 0 });
+        assert.ok(actual.every((v, i) => Math.abs(v - independent[i]) < 1e-8),
+          JSON.stringify({ args, leaveLoaded, actual, independent }));
+        const asyncResult = await fallback.optimizeAsync(...args, { leaveLoaded });
         assert.deepEqual(normalise(asyncResult), normalise(expected));
       }
     }
@@ -142,26 +140,26 @@ test('fallback yields after work begins, permits timers, cancels and then recove
     assert.ok(ticks >= 5);
   } finally { clearInterval(timer); }
   assert.deepEqual(normalise(await fallback.optimizeAsync([60,80], 'count', kg.map(()=>2), kg, 20, null, false, 2)),
-    plain.optimize([60,80], 'count', kg.map(()=>2), kg, 20, null, false, 2));
+    engine.optimize([60,80], 'count', kg.map(()=>2), kg, 20, null, false, 2));
 });
 
 test('fallback captures mutable inputs and isolates concurrent requests', async () => {
   const weights = [60,80,60]; const stock = kg.map(()=>2); const start = [4];
-  const expected = plain.optimize(weights, 'sqrt', stock, kg, 20, start, false, 2, { leaveLoaded: true });
+  const expected = engine.optimize(weights, 'sqrt', stock, kg, 20, start, false, 2, { leaveLoaded: true });
   const work = fallback.optimizeAsync(weights, 'sqrt', stock, kg, 20, start, false, 2, { leaveLoaded: true });
   weights.fill(1000); stock.fill(0); start.push(1);
   const other = fallback.optimizeAsync([30], 'kg', kg.map(()=>2), kg, 20, null, false, 2);
   assert.deepEqual(normalise(await work), expected);
-  assert.deepEqual(normalise(await other), plain.optimize([30], 'kg', kg.map(()=>2), kg, 20, null, false, 2));
+  assert.deepEqual(normalise(await other), engine.optimize([30], 'kg', kg.map(()=>2), kg, 20, null, false, 2));
 });
 
-test('periodic mid-search deadlines abort both storage paths and the fallback', async () => {
-  for (const compactTables of [false, true]) {
+test('periodic mid-search deadlines abort the engine and the fallback', async () => {
+  {
     let calls = 0;
     const module = { exports: {} };
     vm.runInNewContext(source, { module, performance: { now: () => ++calls } });
     assert.throws(() => module.exports.buildAlgoLib().optimize([320,310], 'count', kg.map(()=>6), kg,
-      20, null, false, 2, { compactTables, timeLimitMs: 5 }), { name: 'TimeoutError' });
+      20, null, false, 2, { timeLimitMs: 5 }), { name: 'TimeoutError' });
     assert.ok(calls >= 6, 'deadline must not expire at the initial check');
   }
   await assert.rejects(fallback.optimizeAsync(Array.from({length:50},(_,i)=>i%2?310:320), 'count', kg.map(()=>6), kg,
@@ -182,8 +180,7 @@ test('all denominations preserve complete results across disjoint and repeating 
     const pattern = Array.from({ length: 3 + random(3) }, () => bar + sided * 1.25 * random(61));
     const weights = Array.from({ length: 12 }, (_, i) => i === 5 ? 21 : pattern[i % pattern.length]);
     const args = [weights, mode, stock, kg, bar, start, monotonic, sided];
-    const expected = plain.optimize(...args, { leaveLoaded, compactTables: false });
-    assert.deepEqual(plain.optimize(...args, { leaveLoaded, compactTables: true }), expected);
-    assert.deepEqual(normalise(await fallback.optimizeAsync(...args, { leaveLoaded, compactTables: true })), normalise(expected));
+    const expected = engine.optimize(...args, { leaveLoaded });
+    assert.deepEqual(normalise(await fallback.optimizeAsync(...args, { leaveLoaded })), normalise(expected));
   }
 });

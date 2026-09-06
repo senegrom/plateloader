@@ -34,7 +34,7 @@ function generateFallback(source) {
     }
     const sets = [];
     for (let index = 0; index < weights.length; index++) sets.push(yield* createSet(weights[index], index));`);
-  for (const name of ['feasibilityFor', 'enumerate', 'optimizeRun', 'block', 'computeBlock', 'optimizeRunCompact', 'solve']) {
+  for (const name of ['feasibilityFor', 'enumerate', 'optimizeRun', 'solve']) {
     once(`function ${name}(`, `function* ${name}(`);
     const calls = new RegExp(`(?<!function\\* )\\b${name}\\(`, 'g');
     if (!calls.test(source)) throw new Error(`Missing fallback call site: ${name}`);
