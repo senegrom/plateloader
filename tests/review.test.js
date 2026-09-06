@@ -14,8 +14,9 @@ const kg = [25, 20, 15, 10, 5, 2.5, 1.25];
 const defaults = { input: '', mode: 'count', stock: 2, bar: 20 };
 
 function transition(a, b, mode, sided) {
-  const { remove, add } = state.stackChanges(a, b);
-  const moved = remove.concat(add);
+  let shared = 0;
+  while (shared < a.length && shared < b.length && a[shared] === b[shared]) shared++;
+  const moved = a.slice(shared).concat(b.slice(shared));
   const count = moved.length * sided;
   const mass = moved.reduce((sum, i) => sum + kg[i] * sided, 0);
   const sqrt = moved.reduce((sum, i) => sum + Math.sqrt(kg[i]) * sided, 0);
@@ -76,15 +77,6 @@ function objective(results, mode) {
   }
   return cost;
 }
-
-test('physical instructions preserve order and never mutate their inputs', () => {
-  const before = [1, 4, 3, 5];
-  const after = [1, 4, 0, 6];
-  assert.deepEqual(state.stackChanges(before, after), { remove: [5, 3], keep: [1, 4], add: [0, 6] });
-  assert.deepEqual(before, [1, 4, 3, 5]);
-  assert.deepEqual(after, [1, 4, 0, 6]);
-  assert.deepEqual(state.stackChanges([], []), { remove: [], keep: [], add: [] });
-});
 
 test('open and closed endings match an independent exact oracle', () => {
   let seed = 1627;

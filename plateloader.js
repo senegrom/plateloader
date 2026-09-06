@@ -298,20 +298,6 @@ function renderOrderedStack(stack) {
   return `<div class="stack-order"><strong>${scope}, collar outward:</strong><div class="stack-plates">${chips || emptyLoadLabel()}</div></div>`;
 }
 
-function renderChanges(previous, next) {
-  const changes = stateLib.stackChanges(previous, next);
-  const names = (stack) => stack.map((index) => `${PLATES[index].label} kg`).join(' → ');
-  const scope = oneSided ? 'Loaded side' : 'Each side';
-  if (!changes.remove.length && !changes.add.length) {
-    return '<div class="loading-instructions"><p>No plate changes.</p></div>';
-  }
-  const lines = [];
-  if (changes.remove.length) lines.push(`<p><strong>Remove, outside first:</strong> ${names(changes.remove)}</p>`);
-  if (changes.keep.length) lines.push(`<p><strong>Keep the inner plates:</strong> ${names(changes.keep)}</p>`);
-  if (changes.add.length) lines.push(`<p><strong>Add, in this order:</strong> ${names(changes.add)}</p>`);
-  return `<div class="loading-instructions"><span class="instruction-scope">${scope}</span>${lines.join('')}</div>`;
-}
-
 const deltaClass = (n) => n === 0 ? 'zero' : n <= 4 ? 'few' : 'many';
 const moveLabel = (n) => `${n} move${n === 1 ? '' : 's'}`;
 const plateLabel = (n) => `${n} plate${n === 1 ? '' : 's'}`;
@@ -391,7 +377,6 @@ function renderResults(results, hasStart) {
       </div>
       ${renderBar(r.stack, fromStack, { animateChanges: !isStartingState })}
       ${renderOrderedStack(r.stack)}
-      ${isStartingState ? '' : renderChanges(fromStack, r.stack)}
       <div class="plate-list"><span class="scope-note">Plate totals: </span>${plateChips(r.stack)}${oneSided || r.stack.length === 0 ? '' : ' <span class="scope-note">· per side</span>'}</div>`;
     card.setAttribute('aria-label', isStartingState
       ? `Starting load: ${r.total} kg`
@@ -426,8 +411,7 @@ function renderResults(results, hasStart) {
         <div class="set-total">→ ${emptyLoadLabel()}</div>
         <div class="set-changes"><span class="delta ${deltaClass(cleanupData.bothSidesMoves)}">−${stack.length}${oneSided ? '' : '/side'} · ${moveLabel(cleanupData.bothSidesMoves)}</span>${kgDetail}</div>
       </div>
-      ${renderBar([], stack)}
-      ${renderChanges(stack, [])}`;
+      ${renderBar([], stack)}`;
     fragment.appendChild(cleanup);
     workoutSteps.push({ card: cleanup, cleanup: true });
   }

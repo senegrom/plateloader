@@ -6,13 +6,13 @@ async function ready(page, count) {
   await expect(page.locator('#outputStatus')).toContainText(`${count} valid set`);
 }
 
-test('compact view preserves physical order and describes the actual moves', async ({ page }) => {
+test('compact view preserves physical order without a diagram', async ({ page }) => {
   await page.goto('./#w=60%0A30&c=1');
   await ready(page, 2);
   const cards = page.locator('#output .set');
   await expect(cards.nth(0).locator('.stack-chip')).toHaveText(['5 kg', '15 kg']);
-  await expect(cards.nth(1).locator('.loading-instructions')).toContainText('Remove, outside first: 15 kg');
-  await expect(cards.nth(1).locator('.loading-instructions')).toContainText('Keep the inner plates: 5 kg');
+  await expect(cards.nth(1).locator('.stack-chip')).toHaveText(['5 kg']);
+  await expect(cards.nth(1).locator('.set-changes')).toContainText('1/side · 2 moves');
   await expect(cards.nth(0).locator('.bar-wrap')).toBeHidden();
 });
 

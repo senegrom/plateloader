@@ -384,20 +384,7 @@ function buildStateLib() {
     return state;
   }
 
-  // Physical instructions: remove from the outside inward, keep the shared
-  // inner prefix, then add from the inside outward. Never sort these arrays.
-  function stackChanges(previous, next) {
-    let shared = 0;
-    while (shared < previous.length && shared < next.length && previous[shared] === next[shared]) shared++;
-    return {
-      remove: previous.slice(shared).reverse(),
-      keep: previous.slice(0, shared),
-      add: next.slice(shared),
-    };
-  }
-
   return {
-    stackChanges,
     clampInteger,
     describeBar,
     generateWarmup,
