@@ -373,7 +373,7 @@ textarea[aria-invalid="true"] { border-color: var(--bad); }
 .mode-btn.active .label { color: var(--accent); }
 
 .summary {
-  display: flex; gap: 24px; flex-wrap: wrap;
+  display: flex; gap: 12px 24px; flex-wrap: wrap;
   font-family: 'JetBrains Mono', monospace;
   color: var(--ink-dim); font-size: 13px;
 }
@@ -384,6 +384,7 @@ textarea[aria-invalid="true"] { border-color: var(--bad); }
 }
 #summaryPanel { animation: fadeInUp 220ms ease; }
 #legend { margin-top: 12px; }
+#endStateNote:empty { display: none; }
 
 .sets { display: flex; flex-direction: column; gap: 12px; }
 .set {
@@ -434,9 +435,9 @@ textarea[aria-invalid="true"] { border-color: var(--bad); }
 .set-changes {
   font-family: 'JetBrains Mono', monospace;
   font-size: 12px; color: var(--ink-dim);
-  text-align: right;
+  text-align: right; min-width: 0;
 }
-.set-changes .delta { display: inline-block; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line); }
+.set-changes .delta { display: inline-block; max-width: 100%; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--line); }
 .delta.zero { color: var(--ok); border-color: rgba(108,209,108,0.3); }
 .delta.few  { color: var(--warn); border-color: rgba(243,192,74,0.3); }
 .delta.many { color: var(--bad); border-color: rgba(255,82,82,0.3); }
@@ -572,23 +573,15 @@ textarea[aria-invalid="true"] { border-color: var(--bad); }
 body.compact .set {
   padding: 8px 14px 8px 18px;
   display: grid;
-  grid-template-columns: minmax(54px,auto) minmax(64px,auto) 1fr auto;
-  gap: 14px;
+  grid-template-columns: minmax(54px, max-content) minmax(64px, max-content) minmax(0, 1fr) auto;
+  gap: 8px 12px;
   align-items: center;
 }
 body.compact .set-head { display: contents; }
-body.compact .set-num   { grid-column: 1; margin: 0; }
-body.compact .set-total { grid-column: 2; font-size: 18px; }
-body.compact .set-changes { grid-column: 4; }
+body.compact .set-num   { grid-column: 1; grid-row: 1; margin: 0; white-space: nowrap; }
+body.compact .set-total { grid-column: 2; grid-row: 1; font-size: 18px; white-space: nowrap; }
+body.compact .set-changes { grid-column: 4; grid-row: 1; }
 body.compact .bar-wrap  { display: none; }
-body.compact .plate-list {
-  grid-column: 3;
-  margin-top: 0;
-  text-align: left;
-  overflow: visible;
-  white-space: normal;
-  min-width: 0;
-}
 body.compact .set.invalid .invalid-msg {
   grid-column: 1 / -1;
   text-align: left; padding: 4px 0 0;
@@ -596,11 +589,10 @@ body.compact .set.invalid .invalid-msg {
 body.compact .set.cleanup .set-total { font-size: 14px; }
 @media (max-width: 600px) {
   body.compact .set {
-    grid-template-columns: auto 1fr auto;
+    grid-template-columns: max-content max-content minmax(0, 1fr);
     gap: 8px;
   }
   body.compact .set-changes { grid-column: 3; }
-  body.compact .plate-list { grid-column: 1 / -1; }
 }
 
 @media (max-width: 520px) {
@@ -724,8 +716,14 @@ dialog.warmup input[type=number]:focus { border-color: var(--accent); }
 @media screen {
   /* Compact view: the ordered stack lists every plate, so the totals line
      would repeat it. Print keeps the totals as the text alternative. */
-  body.compact #output .stack-order { display: block; grid-column: 1 / -1; }
-  body.compact #output .plate-list { display: none; }
+  body.compact #output .stack-order {
+    display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px;
+    grid-column: 3; grid-row: 1; min-width: 0; margin: 0;
+  }
+  body.compact #output .plate-list, body.compact #legend { display: none; }
+}
+@media screen and (max-width: 600px) {
+  body.compact #output .stack-order { grid-column: 1 / -1; grid-row: 2; }
 }
 .start-btn, .start-clear-btn, .config-details summary, .constraint-toggle, .custom-stock-item input { min-height: 44px; }
 .start-clear-btn { padding: 8px 12px; font-size: 13px; }
@@ -752,7 +750,12 @@ dialog.warmup input[type=number]:focus { border-color: var(--accent); }
 #workoutHeading:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
 @media (max-width: 600px) {
   header { flex-wrap: wrap; gap: 8px; }
-  .config-actions { display: grid; grid-template-columns: 1fr 1fr; }
+  .config-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .config-actions .btn { min-height: 44px; padding-inline: 8px; letter-spacing: 0.08em; }
+  .summary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 16px; }
+  .summary > div { display: flex; flex-direction: column; }
+  .summary b { margin-top: auto; }
+  .set-head { display: grid; grid-template-columns: max-content max-content minmax(0, 1fr); gap: 8px; }
   .results-toolbar .btn { flex: 1 1 auto; }
   .shortcut-hint { display: none; }
   .config-grid { grid-template-columns: minmax(0, 1fr); }
