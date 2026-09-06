@@ -8,7 +8,6 @@ const vm = require('node:vm');
 const { buildAlgoLib } = require('../algo.js');
 const kg = [25, 20, 15, 10, 5, 2.5, 1.25];
 const algo = buildAlgoLib();
-const heavy = Array.from({ length: 50 }, (_, index) => index % 2 ? 310 : 320);
 
 // Deliberately independent: enumerates ordered physical stacks and solves the
 // small layered shortest-path problem, not the production prefix/interval DP.
@@ -67,7 +66,7 @@ function objective(results, mode) {
   return mode === 'count' ? [moves, mass] : mode === 'kg' ? [mass, moves] : [sqrt, moves];
 }
 
-test('resumable and synchronous searches match each other and an exhaustive oracle', async () => {
+test('zero and 15 kg bars, repeated and off-lattice rows match an exhaustive oracle', () => {
   let seed = 719;
   const random = (n) => { seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; return seed % n; };
   for (let sample = 0; sample < 12; sample++) {
@@ -78,47 +77,14 @@ test('resumable and synchronous searches match each other and an exhaustive orac
       const first = bar + sided * 1.25 * random(13);
       const weights = [first, first, bar + 0.1, bar + sided * 2.5 * random(6), bar + sided * 5];
       for (const mode of ['count', 'kg', 'sqrt']) for (const leaveLoaded of [false, true]) {
-        const args = [weights, mode, stock, kg, bar, start, monotonic, sided, { leaveLoaded, sliceMs: 1 }];
-        const synchronous = algo.optimize(...args);
-        const resumed = await algo.optimizeAsync(...args);
-        assert.deepEqual(resumed, synchronous);
-        const actual = objective(resumed, mode);
+        const results = algo.optimize(weights, mode, stock, kg, bar, start, monotonic, sided, { leaveLoaded });
+        const actual = objective(results, mode);
         const expected = exhaustive(weights, stock, start, bar, sided, monotonic, mode, leaveLoaded);
         assert.ok(actual.every((value, index) => Math.abs(value - expected[index]) < 1e-8),
           JSON.stringify({ sample, sided, monotonic, mode, leaveLoaded, actual, expected }));
       }
     }
   }
-});
-
-test('fallback yields to tasks and can be cancelled after the search starts', async () => {
-  const controller = new AbortController();
-  let ticks = 0;
-  const timer = setInterval(() => { if (++ticks === 4) controller.abort(); }, 10);
-  try {
-    await assert.rejects(algo.optimizeAsync(heavy, 'count', Array(7).fill(6), kg, 20, null, false, 2,
-      { signal: controller.signal, sliceMs: 2 }), { name: 'AbortError' });
-    assert.ok(ticks >= 4);
-  } finally { clearInterval(timer); }
-  assert.deepEqual(await algo.optimizeAsync([60, 80], 'count', Array(7).fill(2), kg, 20, null, false, 2),
-    algo.optimize([60, 80], 'count', Array(7).fill(2), kg, 20, null, false, 2));
-});
-
-test('async inputs are captured before yielding and concurrent searches remain isolated', async () => {
-  const weights = [60, 30], stock = Array(7).fill(2), plates = kg.map((n) => ({ kg: n })), start = [4, 2];
-  const options = { leaveLoaded: true };
-  const expected = algo.optimize(weights, 'count', stock, plates, 20, start, false, 2, options);
-  const pending = algo.optimizeAsync(weights, 'count', stock, plates, 20, start, false, 2, options);
-  weights.fill(999); stock.fill(0); plates[4].kg = 500; start.fill(0); options.leaveLoaded = false;
-  const other = algo.optimizeAsync([20, 70], 'kg', [1, 0, 0, 0, 0, 0, 0], kg, 20, null, true, 2);
-  assert.deepEqual(await pending, expected);
-  assert.deepEqual(await other, algo.optimize([20, 70], 'kg', [1, 0, 0, 0, 0, 0, 0], kg, 20, null, true, 2));
-});
-
-test('an already aborted request never returns even a trivial solution', async () => {
-  const controller = new AbortController(); controller.abort();
-  await assert.rejects(algo.optimizeAsync([], 'count', Array(7).fill(2), kg, 20, null, false, 2,
-    { signal: controller.signal }), { name: 'AbortError' });
 });
 
 test('deadline expiry during search is checked in feasibility and interval phases', () => {
@@ -137,34 +103,5 @@ test('deadline expiry during search is checked in feasibility and interval phase
     assert.throws(() => library.optimize([320, 310], 'count', Array(7).fill(6), kg, 20, null, false, 2,
       { timeLimitMs: 50 }), (error) => error.name === 'TimeoutError');
     assert.equal(expiredDuring, phase, `must expire after entering ${phase}, not at initial validation`);
-  }
-});
-
-test('async timeout rejects without publishing a partial result', async () => {
-  await assert.rejects(algo.optimizeAsync(heavy, 'sqrt', Array(7).fill(6), kg, 20, null, false, 2,
-    { timeLimitMs: 30, sliceMs: 1 }), { name: 'TimeoutError' });
-});
-
-
-test('many deterministic pauses preserve scratch arenas and exact reconstruction', async () => {
-  let ticks = 0, yields = 0;
-  const context = vm.createContext({
-    performance: { now: () => ++ticks },
-    setTimeout: (resolve) => { yields++; resolve(); },
-  });
-  vm.runInContext(fs.readFileSync(path.join(__dirname, '../algo.js'), 'utf8'), context);
-  const library = vm.runInContext('buildAlgoLib()', context);
-  const weights = [60, 70, 80, 60, 80, 70, 30, 60, 50, 40, 45, 20];
-  const stock = [0, 1, 1, 1, 1, 1, 0];
-  for (const mode of ['count', 'kg', 'sqrt']) for (const leaveLoaded of [false, true]) {
-    const before = yields;
-    const results = await library.optimizeAsync(weights, mode, stock, kg, 20, [4, 5], false, 2,
-      { leaveLoaded, sliceMs: 1 });
-    assert.ok(yields - before > 2, 'exercise actual intermediate suspensions, not just the initial task');
-    const expected = exhaustive(weights, stock, [4, 5], 20, 2, false, mode, leaveLoaded);
-    const actual = objective(results, mode);
-    assert.ok(actual.every((value, index) => Math.abs(value - expected[index]) < 1e-8));
-    assert.equal(JSON.stringify(results), JSON.stringify(algo.optimize(weights, mode, stock, kg, 20,
-      [4, 5], false, 2, { leaveLoaded })));
   }
 });

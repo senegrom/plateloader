@@ -67,25 +67,21 @@ function ensureFallbackAlgoLib() {
 
 // ---------- Web Worker for off-main-thread optimisation ----------
 // Cancellation is by reqId: stale results are discarded silently.
-// Resumable exact fallback only if workers cannot start. Runtime errors are reported.
+// Bounded exact fallback only if workers cannot start. Runtime errors are reported.
 let algoWorker = null;
 let workerInitTried = false;
 let workerEverSucceeded = false;
 let currentReqId = 0;
 let inflightReqId = null;
 let workerStartedReqId = null;
-let fallbackController = null;
 let indicatorTimer = null;
 let indicatorReqId = null;
 const INDICATOR_DELAY_MS = 150;
-// The fallback shares the exact search but yields between short batches.
-// Its overall budget still aborts rather than returning an approximation.
-const FALLBACK_BUDGET_MS = 3000;
-
-function cancelFallback() {
-  fallbackController?.abort();
-  fallbackController = null;
-}
+// Only the synchronous fallback (workers unavailable or unable to start) is
+// bounded, and expiry aborts rather than approximates. The search stays plain
+// synchronous code: a resumable generator variant cost every worker
+// calculation 15-80% and was reverted.
+const SYNC_FALLBACK_BUDGET_MS = 3000;
 
 function clearIndicator(reqId = null) {
   if (indicatorTimer === null || (reqId !== null && reqId !== indicatorReqId)) return;
@@ -164,7 +160,7 @@ function ensureAlgoWorker() {
     algoWorker = worker;
     return algoWorker;
   } catch (error) {
-    console.warn('[plate-loader] worker init failed, using resumable fallback:', error && error.message);
+    console.warn('[plate-loader] worker init failed, using sync fallback:', error && error.message);
     return null;
   }
 }
@@ -818,7 +814,6 @@ const updateComputeBtn = () => { goBtn.disabled = inputEl.value.trim().length ==
 let pendingCompute = false;
 function compute(forceFallback) {
   debouncedCompute.cancel();
-  cancelFallback();
   clearIndicator();
   if (pendingWorkoutRestore?.signature !== workoutSignature()) pendingWorkoutRestore = null;
   invalidateWorkout();
@@ -854,7 +849,7 @@ function compute(forceFallback) {
     if (currentReqId !== reqId) return;
     out.innerHTML = '<div class="panel computing-indicator">Computing…</div>';
     summaryPanel.hidden = true;
-    $('cancelCompute').hidden = inflightReqId !== reqId && !fallbackController;
+    $('cancelCompute').hidden = inflightReqId !== reqId;
     announceStatus('Computing plate sequence.');
   };
 
@@ -879,33 +874,36 @@ function compute(forceFallback) {
       });
       return;
     } catch (error) {
-      console.warn('[plate-loader] worker message failed, using resumable fallback:', error);
+      console.warn('[plate-loader] worker message failed, using sync fallback:', error);
       disposeAlgoWorker(false);
       compute(true);
       return;
     }
   }
 
-  const controller = new AbortController();
-  fallbackController = controller;
-  // Capture all settings before loading or yielding. Stale results, errors and
-  // finalizers are request-scoped and cannot overwrite a newer calculation.
+  // Sync fallback: load the optimiser on demand, then yield via rAF so the
+  // indicator paints before optimize() blocks the main thread. Settings are
+  // captured now so a later edit cannot change a request already queued.
   const args = [weights, CURRENT_MODE, effectivePlateMax(), PLATE_KG, BAR,
     requestedStartStack, monotonic, sided(),
-    { leaveLoaded, timeLimitMs: FALLBACK_BUDGET_MS, signal: controller.signal }];
-  indicatorReqId = reqId;
-  indicatorTimer = setTimeout(showIndicator, INDICATOR_DELAY_MS);
-  ensureFallbackAlgoLib().then(async (library) => {
-    if (currentReqId !== reqId || controller.signal.aborted) return;
-    const results = await library.optimizeAsync(...args);
-    if (currentReqId !== reqId || controller.signal.aborted) return;
-    clearIndicator(reqId);
-    renderResults(results, library.hasPinnedStart(weights, requestedStartStack, results));
-  }).catch((error) => {
-    if (currentReqId === reqId && error.name !== 'AbortError') renderComputeError(error);
-  }).finally(() => {
-    if (fallbackController === controller) fallbackController = null;
-    clearIndicator(reqId);
+    { leaveLoaded, timeLimitMs: SYNC_FALLBACK_BUDGET_MS }];
+  requestAnimationFrame(() => {
+    if (currentReqId !== reqId) return;
+    showIndicator();
+    ensureFallbackAlgoLib().then((library) => {
+      if (currentReqId !== reqId) return;
+      requestAnimationFrame(() => {
+        if (currentReqId !== reqId) return;
+        try {
+          const results = library.optimize(...args);
+          renderResults(results, library.hasPinnedStart(weights, requestedStartStack, results));
+        } catch (error) {
+          if (currentReqId === reqId) renderComputeError(error);
+        }
+      });
+    }).catch((error) => {
+      if (currentReqId === reqId) renderComputeError(error);
+    });
   });
 }
 
@@ -1086,7 +1084,6 @@ const schedulePersist = () => {
 };
 const scheduleCompute = () => {
   pendingWorkoutRestore = null;
-  cancelFallback();
   invalidateWorkout();
   ++currentReqId;  // invalidate any result already in flight before the debounce fires
   if (inflightReqId !== null) disposeAlgoWorker(true);
@@ -1207,7 +1204,6 @@ function renderWorkoutStep() {
 
 function cancelCalculation() {
   debouncedCompute.cancel();
-  cancelFallback();
   pendingWorkoutRestore = null;
   ++currentReqId;
   pendingCompute = false;

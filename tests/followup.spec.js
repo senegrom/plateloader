@@ -1,7 +1,6 @@
 'use strict';
 
 const { test, expect } = require('@playwright/test');
-const heavy = Array.from({ length: 50 }, (_, index) => index % 2 ? 310 : 320).join(',');
 const ready = async (page, count) => expect(page.locator('#outputStatus')).toContainText(`${count} valid set`);
 
 function runtimeErrors(page) {
@@ -128,66 +127,4 @@ test('invalid remembered targets are ignored and a valid local preference wins o
   });
   await page.locator('#warmup').click();
   await expect(page.locator('#warmupTarget')).toHaveValue('110');
-});
-
-for (const hideScheduler of [false, true]) {
-test(`no-worker fallback stays responsive and cancels (${hideScheduler ? 'without' : 'with'} native scheduler)`, async ({ page }) => {
-  const errors = runtimeErrors(page);
-  await page.addInitScript((hideScheduler) => {
-    window.Worker = undefined;
-    if (hideScheduler) Object.defineProperty(window, 'scheduler', { value: undefined });
-    window.timerGaps = [];
-    let last = performance.now();
-    setInterval(() => { const now = performance.now(); window.timerGaps.push(now - last); last = now; }, 10);
-  }, hideScheduler);
-  await page.goto(`./#w=${heavy}&s=6`);
-  await expect(page.locator('#cancelCompute')).toBeVisible();
-  await expect.poll(() => page.evaluate(() => window.timerGaps.length)).toBeGreaterThan(10);
-  await page.locator('#cancelCompute').click();
-  await expect(page.locator('#output')).toContainText('Calculation cancelled');
-  await expect(page.locator('#results')).toHaveAttribute('aria-busy', 'false');
-  await expect(page.locator('#cancelCompute')).toBeHidden();
-  const maximumGap = await page.evaluate(() => Math.max(...window.timerGaps));
-  // Generous cross-engine CI margin, still detects the former 3-second block.
-  expect(maximumGap).toBeLessThan(750);
-  await page.locator('#input').fill('60\n80');
-  await ready(page, 2);
-  await expect(page.locator('#startWorkout')).toBeEnabled();
-  expect(errors).toEqual([]);
-});
-
-}
-
-test('late fallback rejections and results cannot clear or overwrite a newer request', async ({ page }) => {
-  const errors = runtimeErrors(page);
-  await page.addInitScript(() => { window.Worker = undefined; });
-  await page.goto('./#w=60');
-  await ready(page, 1);
-  await page.evaluate(() => {
-    window.pendingFallbacks = [];
-    algoLib.optimizeAsync = (...args) => new Promise((resolve, reject) => {
-      window.pendingFallbacks.push({ args, resolve, reject });
-    });
-  });
-  await page.locator('#input').fill('80');
-  await expect.poll(() => page.evaluate(() => window.pendingFallbacks.length)).toBe(1);
-  await page.locator('#input').fill('100');
-  await expect.poll(() => page.evaluate(() => window.pendingFallbacks.length)).toBe(2);
-  expect(await page.evaluate(() => window.pendingFallbacks[0].args[8].signal.aborted)).toBe(true);
-  await page.evaluate(() => window.pendingFallbacks[0].reject(new Error('late failure')));
-  await expect(page.locator('#cancelCompute')).toBeVisible();
-  await page.evaluate(() => {
-    const latest = window.pendingFallbacks[1];
-    latest.resolve(algoLib.optimize(...latest.args));
-  });
-  await ready(page, 1);
-  await expect(page.locator('#output .set-total').first()).toHaveText('100kg');
-  // A late success after Cancel must also remain invisible.
-  await page.locator('#input').fill('120');
-  await expect.poll(() => page.evaluate(() => window.pendingFallbacks.length)).toBe(3);
-  await expect(page.locator('#cancelCompute')).toBeVisible();
-  await page.locator('#cancelCompute').click();
-  await page.evaluate(() => window.pendingFallbacks[2].resolve([]));
-  await expect(page.locator('#output')).toContainText('Calculation cancelled');
-  expect(errors).toEqual([]);
 });
