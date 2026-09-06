@@ -649,6 +649,250 @@ function buildAlgoLib() {
       return stacks;
     }
 
+    // Memory-efficient form of the same interval recurrence. Whole blocks and
+    // row prefixes are shared only for exactly equal sequences of feasible
+    // sets. Costs live for two adjacent prefix-depth layers; only compact
+    // reconstruction choices survive. No search candidate is discarded.
+    function optimizeRunCompact() {
+      const n = activeSets.length;
+      const feasible = [...new Set(activeSets.map((set) => set.feasibility))];
+      const token = new Map(feasible.map((f, i) => [f, i]));
+      const lcp = Array.from({ length: n + 1 }, () => new Uint32Array(n + 1));
+      const words = Array.from({ length: n }, () => new Uint32Array(n));
+      const wordIds = new Map();
+      for (let i = n - 1; i >= 0; i--) {
+        checkTime();
+        for (let j = n - 1; j >= 0; j--) {
+          if (activeSets[i].feasibility === activeSets[j].feasibility) lcp[i][j] = 1 + lcp[i + 1][j + 1];
+        }
+        for (let j = i; j < n; j++) {
+          const key = `${token.get(activeSets[i].feasibility)}|${j > i ? words[i + 1][j] : 0}`;
+          if (!wordIds.has(key)) wordIds.set(key, wordIds.size + 1);
+          words[i][j] = wordIds.get(key);
+        }
+      }
+      // A pinned state's feasibility object is distinct. Open terminal cells
+      // are distinct from closed cells even when their target words match.
+      const patternFor = (s, e) => words[s][e] * 2 + Number(leaveLoaded && e === n - 1);
+      const layouts = new Map();
+      function layoutFor(s, e) {
+        const pattern = patternFor(s, e);
+        if (layouts.has(pattern)) return layouts.get(pattern);
+        const L = e - s + 1;
+        const terminal = leaveLoaded && e === n - 1;
+        const normalEnd = L - Number(terminal);
+        const rows = new Uint32Array(L);
+        const shared = new Uint8Array(L);
+        let total = 0;
+        for (let i = 0; i < L; i++) {
+          const length = Math.max(0, normalEnd - i);
+          let p = 0;
+          while (p < i && lcp[s + i][s + p] < length) p++;
+          if (p < i) { rows[i] = rows[p]; shared[i] = 1; }
+          else { rows[i] = total; total += length + 1; }
+        }
+        const tail = total;
+        if (terminal) total += L;
+        const layout = { rows, shared, total, tail, terminal, normalEnd };
+        layouts.set(pattern, layout);
+        return layout;
+      }
+      // A table fits inside one slab. Reusing slabs across layers avoids
+      // repeated growth/copies and avoids depending on prompt garbage collection.
+      const pageSize = Math.max(32768, n * (n + 5));
+      function makeArena(Type) {
+        const pages = [];
+        let cursor = 0;
+        return {
+          pages,
+          reset() { cursor = 0; },
+          allocate(length) {
+            let page = Math.floor(cursor / pageSize);
+            let offset = cursor % pageSize;
+            if (offset + length > pageSize) { page++; offset = 0; }
+            if (!pages[page]) pages[page] = new Type(pageSize);
+            cursor = page * pageSize + offset + length;
+            return page * pageSize + offset;
+          },
+        };
+      }
+      const valueArenas = [makeArena(Float64Array), makeArena(Float64Array)];
+      const choiceArena = makeArena(NP * n <= 32767 ? Int16Array : Int32Array);
+      const tables = [];
+      const memo = new Map();
+      let size = 0;
+      let starts = new Uint32Array(1024);
+      let ends = new Uint32Array(1024);
+      let next = new Uint32Array(1024);
+      let tableIds = new Uint32Array(1024);
+      function record(start, end, table, head) {
+        if (++size === starts.length) {
+          const grow = (array) => { const bigger = new Uint32Array(array.length * 2); bigger.set(array); return bigger; };
+          starts = grow(starts); ends = grow(ends); next = grow(next); tableIds = grow(tableIds);
+        }
+        starts[size] = start; ends[size] = end; next[size] = head; tableIds[size] = table;
+        return size;
+      }
+      const admits = (s, key) => activeSets[s].feasibility.prefixKeys.has(key);
+      function find(s, key) {
+        let id = memo.get(key) || 0;
+        while (id && (s < starts[id] || s > ends[id])) id = next[id];
+        return id;
+      }
+      const seen = createMembership();
+      const levels = [[0]];
+      seen.add(0);
+      for (let depth = 0; depth < levels.length; depth++) {
+        const children = [];
+        for (const key of levels[depth]) {
+          checkTime();
+          let last = -1;
+          if (monotonic) for (let p = NP - 1; p >= 0; p--) if (countAt(key, p)) { last = p; break; }
+          for (let p = 0; p < NP; p++) {
+            if (countAt(key, p) >= plateMax[p] || (monotonic && p < last)) continue;
+            const child = key + multipliers[p];
+            if (!seen.has(child) && feasible.some((f) => f.prefixKeys.has(child))) {
+              seen.add(child); children.push(child);
+            }
+          }
+        }
+        if (children.length) levels.push(children);
+      }
+      let scratch = new Float64Array(1024);
+      let minimum = new Int32Array(1024);
+      let stops = new Uint8Array(n);
+      let currentValues, childValues;
+      function solve(s, end, key, prefixUnits) {
+        checkTime();
+        const L = end - s + 1;
+        let last = -1;
+        if (monotonic) for (let p = NP - 1; p >= 0; p--) if (countAt(key, p)) { last = p; break; }
+        const extensions = [];
+        for (let p = 0; p < NP; p++) {
+          if (countAt(key, p) < plateMax[p] && (!monotonic || p >= last)) extensions.push(p);
+        }
+        const pairs = L * (L + 1) / 2;
+        const secondaryBase = extensions.length * pairs;
+        if (scratch.length < 2 * secondaryBase) scratch = new Float64Array(2 * secondaryBase);
+        if (minimum.length < extensions.length * L) minimum = new Int32Array(extensions.length * L);
+        minimum.fill(L, 0, extensions.length * L);
+        for (let e = 0; e < extensions.length; e++) {
+          const p = extensions[e];
+          const childKey = key + multipliers[p];
+          for (let r = s; r <= end; r++) {
+            checkTime();
+            if (!admits(r, childKey)) continue;
+            const child = find(r, childKey);
+            if (!child) throw new Error('Missing exact child table');
+            const table = tables[tableIds[child]];
+            const layout = table.layout;
+            const buffer = childValues.pages[Math.floor(table.value / pageSize)];
+            const base = table.value % pageSize;
+            const relative = r - starts[child];
+            const row = layout.rows[relative];
+            if (r === starts[child]) {
+              for (let j = r; j <= ends[child]; j++) minimum[e * L + j - s] = r - s;
+            }
+            for (let j = r; j <= ends[child]; j++) {
+              const column = j - s;
+              const index = e * pairs + column * (column + 1) / 2 + r - s;
+              const isTail = layout.terminal && j === n - 1;
+              const offset = base + (isTail ? layout.tail + relative : row + j - r + 1);
+              const factor = isTail ? 0.5 : 1;
+              scratch[index] = factor * primaryPlateCost[p] + buffer[offset];
+              scratch[secondaryBase + index] = factor * secondaryPlateCost[p] + buffer[offset + layout.total];
+            }
+          }
+        }
+        for (let j = 0; j < L; j++) {
+          const set = activeSets[s + j];
+          stops[j] = Number(set.pinnedKey === undefined ? set.targetUnits === prefixUnits : set.pinnedKey === key);
+        }
+        const layout = layoutFor(s, end);
+        const { rows, shared, total, tail, terminal, normalEnd } = layout;
+        const value = currentValues.allocate(2 * total);
+        const choice = choiceArena.allocate(total);
+        const values = currentValues.pages[Math.floor(value / pageSize)];
+        const choices = choiceArena.pages[Math.floor(choice / pageSize)];
+        const v = value % pageSize;
+        const c = choice % pageSize;
+        for (let i = 0; i < L; i++) {
+          const row = v + rows[i];
+          const secondaryRow = row + total;
+          if (!shared[i]) { values[row] = 0; values[secondaryRow] = 0; choices[c + rows[i]] = -2; }
+          for (let j = shared[i] ? normalEnd : i; j < L; j++) {
+            checkTime();
+            const m = j - i + 1;
+            const target = terminal && j === L - 1 ? tail + i : rows[i] + m;
+            let bestPrimary = Infinity, bestSecondary = Infinity, bestChoice = -2;
+            if (stops[j]) { bestPrimary = values[row + m - 1]; bestSecondary = values[secondaryRow + m - 1]; bestChoice = -1; }
+            const column = j * (j + 1) / 2;
+            for (let e = 0; e < extensions.length; e++) {
+              const low = Math.max(i, minimum[e * L + j]);
+              const base = e * pairs + column;
+              for (let r = j; r >= low; r--) {
+                const p = values[row + r - i] + scratch[base + r];
+                const q = values[secondaryRow + r - i] + scratch[secondaryBase + base + r];
+                if (p < bestPrimary - EPSILON || (p <= bestPrimary + EPSILON && q < bestSecondary - EPSILON)) {
+                  bestPrimary = p; bestSecondary = q;
+                  bestChoice = extensions[e] * L + r - i;
+                }
+              }
+            }
+            values[v + target] = bestPrimary; values[v + total + target] = bestSecondary;
+            choices[c + target] = bestChoice;
+          }
+        }
+        tables.push({ pattern: patternFor(s, end), layout, value, choice });
+        return tables.length - 1;
+      }
+      for (let depth = levels.length - 1; depth >= 0; depth--) {
+        currentValues = valueArenas[depth % 2]; currentValues.reset();
+        childValues = valueArenas[(depth + 1) % 2];
+        for (const key of levels[depth]) {
+          checkTime();
+          let prefixUnits = 0;
+          for (let p = 0; p < NP; p++) prefixUnits += countAt(key, p) * units[p];
+          let head = 0;
+          for (let s = 0; s < n; s++) {
+            if (!admits(s, key)) continue;
+            let end = s;
+            while (end + 1 < n && admits(end + 1, key)) end++;
+            const pattern = patternFor(s, end);
+            let same = head;
+            while (same && tables[tableIds[same]].pattern !== pattern) same = next[same];
+            const table = same ? tableIds[same] : solve(s, end, key, prefixUnits);
+            head = record(s, end, table, head);
+            s = end;
+          }
+          memo.set(key, head);
+        }
+      }
+      const stacks = new Array(n);
+      function reconstruct(start, end, prefix, key) {
+        const id = find(start, key);
+        if (!id) throw new Error('Missing exact reconstruction table');
+        const table = tables[tableIds[id]];
+        const { layout } = table;
+        const L = ends[id] - starts[id] + 1;
+        const relative = start - starts[id];
+        const choices = choiceArena.pages[Math.floor(table.choice / pageSize)];
+        const base = table.choice % pageSize;
+        while (end >= start) {
+          const offset = layout.terminal && end === n - 1 ? layout.tail + relative : layout.rows[relative] + end - start + 1;
+          const choice = choices[base + offset];
+          if (choice === -2) throw new Error('No exact plate arrangement found');
+          if (choice === -1) { stacks[end--] = prefix.slice(); continue; }
+          const p = Math.floor(choice / L);
+          const runStart = start + choice % L;
+          prefix.push(p); reconstruct(runStart, end, prefix, key + multipliers[p]); prefix.pop();
+          end = runStart - 1;
+        }
+      }
+      reconstruct(0, n - 1, [], 0);
+      return stacks;
+    }
+
     function transitionStats(previous, next) {
       let shared = 0;
       while (
@@ -681,7 +925,12 @@ function buildAlgoLib() {
       };
     }
 
-    const stacks = optimizeRun();
+    // Keep the existing small-session hot path. Both implementations use the
+    // same recurrence and candidate order; this selects storage, not accuracy.
+    const compactTables = options && options.compactTables === true ||
+      ((!options || options.compactTables !== false) && activeSets.length > 1 &&
+       activeSets.length * activeSets.length * stateCount > 2_000_000);
+    const stacks = compactTables ? optimizeRunCompact() : optimizeRun();
     const output = [];
     let previousStack = [];
     let activeIndex = 0;

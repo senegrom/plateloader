@@ -44,7 +44,7 @@ body {
   top: calc(8px + env(safe-area-inset-top));
   left: calc(8px + env(safe-area-inset-left));
   transform: translateY(-160%);
-  background: var(--accent); color: #fff;
+  background: var(--accent); color: var(--bg);
   border-radius: 6px; padding: 10px 14px;
   font-weight: 600; text-decoration: none;
 }
@@ -112,7 +112,7 @@ select { appearance: none; -webkit-appearance: none; cursor: pointer; padding-ri
          background-repeat: no-repeat; }
 
 .btn {
-  background: var(--accent); color: #fff; border: none;
+  background: var(--accent); color: var(--bg); border: none;
   padding: 12px 18px; border-radius: 6px;
   font-family: 'Bebas Neue', sans-serif; font-size: 16px; letter-spacing: 0.12em;
   cursor: pointer;
@@ -673,7 +673,7 @@ dialog.warmup input[type=number]:focus { border-color: var(--accent); }
   animation: fadeInUp 200ms ease;
 }
 .update-toast button {
-  background: var(--accent); color: #fff; border: none;
+  background: var(--accent); color: var(--bg); border: none;
   padding: 6px 12px; border-radius: 5px;
   font-family: 'Bebas Neue', sans-serif; font-size: 13px; letter-spacing: 0.1em;
   cursor: pointer;

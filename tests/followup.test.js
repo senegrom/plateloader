@@ -87,9 +87,13 @@ test('zero and 15 kg bars, repeated and off-lattice rows match an exhaustive ora
   }
 });
 
-test('deadline expiry during search is checked in feasibility and interval phases', () => {
+test('deadline expiry during search is checked in feasibility and both interval engines', () => {
   const source = fs.readFileSync(path.join(__dirname, '../algo.js'), 'utf8');
-  for (const phase of ['enumerate', 'computeBlock']) {
+  // Force the storage path whose phase is being instrumented. The default
+  // now selects compact tables for this input, so computeBlock is not called.
+  for (const [phase, compactTables] of [
+    ['enumerate', false], ['enumerate', true], ['computeBlock', false], ['solve', true],
+  ]) {
     let expiredDuring = null;
     const context = vm.createContext({
       performance: { now() {
@@ -101,7 +105,7 @@ test('deadline expiry during search is checked in feasibility and interval phase
     vm.runInContext(source, context);
     const library = vm.runInContext('buildAlgoLib()', context);
     assert.throws(() => library.optimize([320, 310], 'count', Array(7).fill(6), kg, 20, null, false, 2,
-      { timeLimitMs: 50 }), (error) => error.name === 'TimeoutError');
+      { timeLimitMs: 50, compactTables }), (error) => error.name === 'TimeoutError');
     assert.equal(expiredDuring, phase, `must expire after entering ${phase}, not at initial validation`);
   }
 });
