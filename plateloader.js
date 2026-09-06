@@ -195,9 +195,16 @@ function setResultsBusy(busy) {
   if (!busy) $('cancelCompute').hidden = true;
 }
 
+// The toolbar and the compact-view context line only make sense once there
+// is (or is about to be) a plan to act on.
+function showResultsChrome(on) {
+  $('resultsToolbar').hidden = !on;
+  $('compactNote').hidden = !on;
+}
+
 function renderInputErrors(errors) {
   setResultsBusy(false);
-  $('resultsToolbar').hidden = true;
+  showResultsChrome(false);
   const visible = errors.slice(0, 5);
   const remaining = errors.length - visible.length;
   inputEl.setAttribute('aria-invalid', 'true');
@@ -217,7 +224,7 @@ function clearInputErrorState() {
 
 function renderComputeError(error) {
   setResultsBusy(false);
-  $('resultsToolbar').hidden = true;
+  showResultsChrome(false);
   clearIndicator();
   inflightReqId = null;
   const message = error && error.name === 'TimeoutError'
@@ -293,10 +300,12 @@ function plateChips(stack) {
 }
 
 // Preserve physical order even when the diagram is hidden in compact view.
+// The per-card label is for screen readers; sighted users get one context
+// line above the cards.
 function renderOrderedStack(stack) {
   const scope = oneSided ? 'Loaded side' : 'Each side';
   const chips = stack.map((index, position) => `<span class="stack-step">${position ? '<span aria-hidden="true">→</span> ' : ''}<span class="stack-chip">${PLATES[index].label} kg</span></span>`).join('');
-  return `<div class="stack-order"><strong>${scope}, collar outward:</strong><div class="stack-plates">${chips || emptyLoadLabel()}</div></div>`;
+  return `<div class="stack-order"><strong class="visually-hidden">${scope}, collar outward:</strong><div class="stack-plates">${chips || emptyLoadLabel()}</div></div>`;
 }
 
 const deltaClass = (n) => n === 0 ? 'zero' : n <= 4 ? 'few' : 'many';
@@ -418,7 +427,10 @@ function renderResults(results, hasStart) {
   }
 
   out.replaceChildren(fragment);
-  $('resultsToolbar').hidden = false;
+  showResultsChrome(true);
+  // Compact view lists stacks as chips; say once, above the cards, which
+  // side and direction they describe instead of labelling every card.
+  $('compactNote').textContent = `${oneSided ? 'Loaded side' : 'Each side'}, listed from the collar outward.`;
   // The unload card already shows the default ending; only the exception
   // needs a sentence.
   $('endStateNote').textContent = leaveLoaded
@@ -847,7 +859,7 @@ function compute(forceFallback) {
   clearInputErrorState();
   if (weights.length === 0) {
     setResultsBusy(false);
-    $('resultsToolbar').hidden = true;
+    showResultsChrome(false);
     out.innerHTML = '<div class="panel empty-state">Enter some weights above.</div>';
     summaryPanel.hidden = true;
     announceStatus('No sets entered.');
@@ -855,7 +867,7 @@ function compute(forceFallback) {
   }
 
   setResultsBusy(true);
-  $('resultsToolbar').hidden = false;
+  showResultsChrome(true);
   const showIndicator = () => {
     if (currentReqId !== reqId) return;
     out.innerHTML = '<div class="panel computing-indicator">Computing…</div>';
@@ -1221,7 +1233,7 @@ function cancelCalculation() {
   disposeAlgoWorker(true);
   invalidateWorkout();
   setResultsBusy(false);
-  $('resultsToolbar').hidden = true;
+  showResultsChrome(false);
   $('summaryPanel').hidden = true;
   $('output').innerHTML = '<div class="panel">Calculation cancelled. Change the sets or press Compute to try again.</div>';
   announceStatus('Calculation cancelled.');

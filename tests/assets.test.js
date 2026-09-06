@@ -185,7 +185,7 @@ test('CI tests both desktop platforms, builds once and deploys that artifact', (
 test('metadata documents the shipped behavior', () => {
   const packageJson = JSON.parse(read('package.json'));
   const readme = read('README.md');
-  assert.equal(packageJson.version, '1.7.1');
+  assert.equal(packageJson.version, '1.7.2');
   assert.equal(packageJson.scripts['test:browser'], 'npm run build && playwright test');
   // Exact pin, no range: Dependabot may move the number, not the style.
   assert.match(packageJson.devDependencies['@playwright/test'], /^\d+\.\d+\.\d+$/);
@@ -203,7 +203,7 @@ test('committed text uses LF and all JavaScript parses under Node', () => {
     'index.html', 'manifest.json', 'package.json', 'plateloader.css',
     'plateloader.js', 'playwright.config.js', 'state.js', 'algo.js',
     'algo-worker.js', 'sw.js', 'scripts/build-site.js', 'scripts/generate-fallback.js',
-    'tests/browser.spec.js', 'tests/followup.spec.js', 'tests/followup.test.js',
+    'tests/browser.spec.js', 'tests/concise-layout.spec.js', 'tests/followup.spec.js', 'tests/followup.test.js',
     'tests/memory-fallback.spec.js', 'tests/memory-fallback.test.js', 'tests/mobile.spec.js',
     'tests/offline-origin.js', 'tests/review.test.js', 'tests/serve-site.js',
   ];

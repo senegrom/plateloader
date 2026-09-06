@@ -14,6 +14,13 @@ test('compact view preserves physical order without a diagram', async ({ page })
   await expect(cards.nth(1).locator('.stack-chip')).toHaveText(['5 kg']);
   await expect(cards.nth(1).locator('.set-changes')).toContainText('1/side · 2 moves');
   await expect(cards.nth(0).locator('.bar-wrap')).toBeHidden();
+  // One context line above the cards; the per-card label is screen-reader only.
+  await expect(page.locator('#compactNote')).toBeVisible();
+  await expect(page.locator('#compactNote')).toHaveText('Each side, listed from the collar outward.');
+  // Playwright counts a clipped 1px element as visible, so check the class.
+  await expect(cards.nth(0).locator('.stack-order strong')).toHaveClass(/visually-hidden/);
+  await page.locator('#compactToggle').click();
+  await expect(page.locator('#compactNote')).toBeHidden();
 });
 
 test('all seven denominations remain visible without horizontal page overflow', async ({ page }) => {

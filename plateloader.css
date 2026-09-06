@@ -709,7 +709,8 @@ dialog.warmup input[type=number]:focus { border-color: var(--accent); }
 
 /* Ordered text is only needed when compact view hides the bar diagram. */
 .stack-order { display: none; margin: 10px 0 0; font-size: 13px; line-height: 1.8; }
-.stack-order strong { display: block; font-weight: 600; }
+.compact-note { display: none; margin: 0 0 10px; }
+body.compact .compact-note:not([hidden]) { display: block; }
 .stack-plates { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px; }
 .stack-step { display: inline-flex; gap: 4px; align-items: baseline; white-space: nowrap; }
 .stack-chip { border: 1px solid var(--line); border-radius: 5px; padding: 1px 7px; font-family: 'JetBrains Mono', monospace; }
@@ -769,5 +770,5 @@ dialog.warmup input[type=number]:focus { border-color: var(--accent); }
 .bar-wrap:focus-visible, .start-viz:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 @media print {
   #results { display: block !important; }
-  #workoutPanel, .results-toolbar, .undo-bar { display: none !important; }
+  #workoutPanel, .results-toolbar, .undo-bar, .compact-note { display: none !important; }
 }
