@@ -529,7 +529,9 @@ function buildAlgoLib() {
             const base = table.value % pageSize;
             const relative = r - starts[child];
             const row = layout.rows[relative];
-            if (r === starts[child]) {
+            // Only a pinned start can admit key+p without key, so its child
+            // block may begin before s. Runs into it still start at s or later.
+            if (r === starts[child] || r === s) {
               for (let j = r; j <= ends[child]; j++) minimum[e * L + j - s] = r - s;
             }
             for (let j = r; j <= ends[child]; j++) {

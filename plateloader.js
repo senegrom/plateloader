@@ -821,8 +821,8 @@ function setCompact(on) {
   on = !!on;
   document.body.classList.toggle('compact', on);
   compactBtn.classList.toggle('active', on);
+  // A toggle keeps its name; the pressed state says whether it is on.
   compactBtn.setAttribute('aria-pressed', on ? 'true' : 'false');
-  compactBtn.textContent = on ? 'Full view' : 'Compact view';
 }
 
 const updateComputeBtn = () => { goBtn.disabled = inputEl.value.trim().length === 0; };
@@ -1008,7 +1008,8 @@ function applyState(state) {
   // Preserve crafted state long enough for the input validator to report it;
   // persistence and sharing still cap the stored value.
   inputEl.value = input;
-  carriedStock = stateLib.parseStockVector(next.carriedStock, PLATES.length, START_MAX_PER_TYPE);
+  const carried = stateLib.parseStockVector(next.carriedStock, PLATES.length, START_MAX_PER_TYPE);
+  carriedStock = carried && carried.some(Boolean) ? carried : null;
   leaveLoaded = next.leaveLoaded === true;
   $('leaveLoadedToggle').checked = leaveLoaded;
   setMode(['count', 'kg', 'sqrt'].includes(next.mode) ? next.mode : DEFAULT_MODE);
@@ -1136,7 +1137,9 @@ function updateSettingsSummary() {
   $('settingsSummary').textContent = `${BAR} kg bar · ${customStock ? 'custom stock' : `stock ${stockPreset} ${scope}`}${leaveLoaded ? ' · leave loaded' : ''}`;
   $('carriedStockPanel').hidden = !carriedStock;
   $('carriedStockNote').textContent = carriedStock
-    ? `Inventory retained from previous sets (${scope}): ${carriedStock.map((count, index) => `${count} × ${PLATES[index].label} kg`).join(', ')}. These counts remain available until reset.`
+    ? `Plates kept from an earlier starting stack (${scope}): ${carriedStock
+      .map((count, index) => (count ? `${count} × ${PLATES[index].label} kg` : ''))
+      .filter(Boolean).join(', ')}.`
     : '';
 }
 
@@ -1261,9 +1264,10 @@ $('replanRemaining').addEventListener('click', () => {
   if (!remaining.length) return;
   const available = effectivePlateMax();
   rememberReplacement('Remaining sets now start from the displayed, already-loaded bar.');
-  // Keep plates removed in previous sets available, including any starting
-  // inventory above the configured stock. This floor is visible and shareable.
-  carriedStock = available.some((count, index) => count > plateMax[index]) ? available : null;
+  // Starting plates above the configured stock stay available once unloaded.
+  // Carry only that excess so later stock changes still apply.
+  const excess = available.map((count, index) => (count > plateMax[index] ? count : 0));
+  carriedStock = excess.some(Boolean) ? excess : null;
   setStartStack(step.result.stack);
   inputEl.value = remaining.join('\n');
   showWorkout(false);

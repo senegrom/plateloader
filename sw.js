@@ -79,7 +79,8 @@ self.addEventListener('message', (event) => {
   }
 });
 
-async function cachedShellResponse(cacheKey, isNavigation) {
+// Navigations are keyed to INDEX_URL, so one cache lookup covers them too.
+async function cachedShellResponse(cacheKey) {
   let cache = null;
   try {
     cache = await caches.open(CACHE_VERSION);
@@ -87,22 +88,16 @@ async function cachedShellResponse(cacheKey, isNavigation) {
     if (cached) return cached;
   } catch (_) {}
 
-  let response = null;
+  let response;
   try {
     response = await fetch(new Request(cacheKey, { cache: 'reload' }));
-  } catch (_) {}
-
-  if (response) {
-    if (cache && response.ok) {
-      try { await cache.put(cacheKey, response.clone()); } catch (_) {}
-    }
-    return response;
+  } catch (_) {
+    return Response.error();
   }
-
-  if (isNavigation && cache) {
-    try { return await cache.match(INDEX_URL) || Response.error(); } catch (_) {}
+  if (cache && response.ok) {
+    try { await cache.put(cacheKey, response.clone()); } catch (_) {}
   }
-  return Response.error();
+  return response;
 }
 
 self.addEventListener('fetch', (event) => {
@@ -112,7 +107,5 @@ self.addEventListener('fetch', (event) => {
 
   const cacheKey = cacheKeyFor(request);
   if (!cacheKey) return;
-
-  const isNavigation = request.mode === 'navigate' || request.destination === 'document';
-  event.respondWith(cachedShellResponse(cacheKey, isNavigation));
+  event.respondWith(cachedShellResponse(cacheKey));
 });

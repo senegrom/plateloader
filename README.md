@@ -8,7 +8,7 @@ Every valid set shows the physical plate order **from the collar outward**; the 
 
 Settings are collapsed to keep the mobile planner short. Workout view shows the current set, previous/next controls and the next weight. Progress is stored locally and restored only when the plan still matches. The full sequence remains available through **Plan / all sets**.
 
-**Edit remaining sets from this bar** treats the displayed set as complete and its stack as already loaded. Check the physical bar first. The remaining list is re-optimised from that exact ordered stack, retaining invalid annotations and any starting inventory already unloaded during the workout. Retained inventory is shown in settings, can be reset, and is included in shared links.
+**Edit remaining sets from this bar** treats the displayed set as complete and its stack as already loaded. Check the physical bar first. The remaining list is re-optimised from that exact ordered stack, retaining invalid annotations. Starting plates above the configured stock stay available after they are unloaded; only that excess is kept, so later stock changes still apply. It is shown in settings, can be reset, and is included in shared links.
 
 Clear, Load example, Generate warmup, Clear starting stack, Reset carried inventory and replanning offer Undo (up to ten replacements during the current page session). Undo also restores the previous workout position and active view after that same plan has successfully recomputed, even if a replacement calculation overwrote saved progress or browser storage is unavailable.
 

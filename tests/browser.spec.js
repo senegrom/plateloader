@@ -25,6 +25,8 @@ test('primary workflow, bypass navigation and custom stock round-trip', async ({
   await expect(page.locator('#results[aria-labelledby="resultsHeading"]')).toHaveCount(1);
   await page.locator('#input').fill('60\n80\n100');
   await expect(page.locator('#summaryPanel')).toBeVisible();
+  // The near-black 1.25 kg swatch needs a light ring on the dark theme.
+  await expect(page.locator('#legend .w-1_25')).not.toHaveCSS('box-shadow', 'none');
   await expect(page.locator('#output article.set')).toHaveCount(4);
   await expect(page.locator('#outputStatus')).toContainText('3 valid sets');
   const stateUrl = page.url();

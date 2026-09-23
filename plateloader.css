@@ -234,6 +234,8 @@ kbd {
 .w-2_5  { --plate-color: var(--p-2_5); }
 .w-1_25 { --plate-color: var(--p-1_25); }
 .swatch, .legend i, .plate { background: var(--plate-color); }
+/* The near-black plate needs the same light ring as in the bar diagram. */
+.swatch.w-1_25, .legend i.w-1_25 { box-shadow: 0 0 0 1px rgba(200,200,200,0.35); }
 
 .stock-row { display: flex; align-items: center; gap: 16px; }
 #stockSlider[data-stock='0'] { --fill: 0%; }

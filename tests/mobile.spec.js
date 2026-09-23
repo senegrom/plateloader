@@ -19,8 +19,12 @@ test('compact view preserves physical order without a diagram', async ({ page })
   await expect(page.locator('#compactNote')).toHaveText('Each side, listed from the collar outward.');
   // Playwright counts a clipped 1px element as visible, so check the class.
   await expect(cards.nth(0).locator('.stack-order strong')).toHaveClass(/visually-hidden/);
-  await page.locator('#compactToggle').click();
+  const toggle = page.locator('#compactToggle');
+  await expect(toggle).toHaveAttribute('aria-pressed', 'true');
+  await toggle.click();
   await expect(page.locator('#compactNote')).toBeHidden();
+  await expect(toggle).toHaveAttribute('aria-pressed', 'false');
+  await expect(toggle).toHaveText('Compact view');
 });
 
 test('all seven denominations remain visible without horizontal page overflow', async ({ page }) => {
@@ -112,6 +116,22 @@ test('unloaded starting inventory stays available when replanning and sharing', 
   await ready(recipient, 1);
   await expect(recipient.locator('#output .invalid')).toHaveCount(0);
   await recipient.close();
+});
+
+test('replanning carries only starting plates above the configured stock', async ({ page }) => {
+  await page.goto('./#w=20%0A340&s=2&i=1.1.1.1.1.1.1.1');
+  await ready(page, 2);
+  await page.locator('#startWorkout').click();
+  await page.locator('#replanRemaining').click();
+  await ready(page, 1);
+  expect(new URL(page.url()).hash).toContain('a=0.8.0.0.0.0.0');
+  await expect(page.locator('#carriedStockNote')).toHaveText('Plates kept from an earlier starting stack (per side): 8 × 20 kg.');
+  // Lowering the preset still removes every other denomination.
+  await page.locator('#stockSlider').evaluate((slider) => {
+    slider.value = '0';
+    slider.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+  await expect(page.locator('#output .set').first().locator('.chip')).toHaveText(['8× 20 kg']);
 });
 
 test('leaving the bar loaded changes the optimisation totals and round-trips', async ({ page }) => {

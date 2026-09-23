@@ -9,9 +9,10 @@ on:
 permissions:
   contents: read
 
+# Superseded branch runs are cancelled; a running Pages deployment finishes.
 concurrency:
   group: pages-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   unit:

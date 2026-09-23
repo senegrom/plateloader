@@ -87,6 +87,23 @@ test('zero and 15 kg bars, repeated and off-lattice rows match an exhaustive ora
   }
 });
 
+// A pinned start admits only its own ordered prefixes, so the first block of
+// user sets can reach those plate counts in another order while the start
+// cannot. Later repeats of that block reuse its table and need those orders.
+test('pinned starts leave other orders of their plates available to later sets', () => {
+  for (const [weights, stock, start, mode, leaveLoaded, optimum] of [
+    [[190, 60, 190, 60, 195, 200], [1, 1, 1, 1, 1, 1, 1], [2, 0, 1, 0], 'count', false, [52, 970]],
+    [[100, 40, 100, 40, 80], [1, 0, 0, 2, 1, 0, 0], [0, 4, 3], 'sqrt', true, [97.65890105634494, 28]],
+  ]) {
+    const results = algo.optimize(weights, mode, stock, kg, 20, start, false, 2, { leaveLoaded });
+    const expected = exhaustive(weights, stock, start, 20, 2, false, mode, leaveLoaded);
+    for (const pair of [objective(results, mode), optimum]) {
+      assert.ok(pair.every((value, index) => Math.abs(value - expected[index]) < 1e-8),
+        JSON.stringify({ weights, start, mode, pair, expected }));
+    }
+  }
+});
+
 test('deadline expiry during search is checked in feasibility and interval phases', () => {
   const source = fs.readFileSync(path.join(__dirname, '../algo.js'), 'utf8');
   for (const phase of ['enumerate', 'solve']) {
